@@ -5,11 +5,17 @@ import threading
 import time
 import json
 
-from mininet.net import Mininet
+from mininet.net import Mininet, Node
 from mininet.node import RemoteController
 from mininet.cli import CLI
 from mininet.link import TCLink
 from mininet.log import setLogLevel
+from mininet.clean import cleanup
+
+import requests
+
+SERVER_IP='127.0.0.1'
+SERVER_PORT=8080
 
 
 def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
@@ -21,7 +27,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     - ogni leaf è collegato a tutti gli spine
     - ogni T sec cade un link leaf<->spine casuale
     """
-
+    cleanup()
     net = Mininet(controller=RemoteController, link=TCLink)
     net.addController("c0")
 
@@ -47,16 +53,17 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
             net.addLink(host, leaf, bw=50)
 
     net.start()
+    net.waitConnected()
 
     # ----- CREAZIONE DINAMICA DELLE SLICE -----
     def create_slices(hosts, num_slices):
         slices = {i: [] for i in range(num_slices)}
-        host_list = hosts[:]
+        host_list: list[Node] = hosts[:]
         random.shuffle(host_list)
 
         for idx, host in enumerate(host_list):
             slice_id = idx % num_slices
-            slices[slice_id].append(host.name)
+            slices[slice_id].append(host.IP())
 
         return slices
 
@@ -66,6 +73,16 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     # Salvataggio su file JSON per il controller
     with open("slices.json", "w") as f:
         json.dump(slices, f)
+
+    request_result = requests.post(f'http://{SERVER_IP}:{SERVER_PORT}/api/v0/slices', 
+                                   headers={'ContentType': 'application/json'},
+                                   json=slices)
+    if request_result.status_code != 200:
+        print(f"Server returned status {request_result.status_code}")
+        print(f'Body: {request_result.json()}')
+        net.stop()
+        cleanup()
+        return
 
     # ----- EVENTI AMBIENTALI -----
     def environmental_events():
@@ -86,11 +103,12 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
                 net.configLinkStatus(spine.name, leaf.name, "up")
                 print(f"Stato link dopo up: {link.intf1.status()} - {link.intf2.status()}")
 
-    event_thread = threading.Thread(target=environmental_events, daemon=True)
-    event_thread.start()
+    #event_thread = threading.Thread(target=environmental_events, daemon=True)
+    #event_thread.start()
 
     CLI(net)
     net.stop()
+    cleanup()
 
 
 if __name__ == "__main__":

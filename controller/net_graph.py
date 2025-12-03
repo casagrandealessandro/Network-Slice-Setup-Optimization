@@ -1,8 +1,7 @@
 import unittest
-import typing
 import copy
 
-from typing import List
+from typing import List, Dict, Tuple, Optional
 
 class NetNode:
     def __init__(self):
@@ -36,6 +35,9 @@ class NetHost(NetNode):
 
     def __str__(self):
         return f'Host({self.ip})'
+
+    def __hash__(self):
+        return hash(self.ip)
     
 class NetLink:
     def __init__(self, bw: int, delay: float, node0: NetNode, node1: NetNode, port1: str, port2: str):
@@ -64,20 +66,135 @@ class NetGraph:
     def __init__(self):
         self.links: list[NetLink] = []
         self.nodes: list[NetNode] = []
+        self.path_cache: Dict[NetNode, Dict[NetNode, Tuple[str, list[NetLink]]]] = {}
         return
+
+    def cache_invalidate(self):
+        length = len(self.path_cache)
+        self.path_cache.clear()
+        return length
+
+    def _cache_add(self, src: NetNode, dst: NetNode, path: List[NetLink], opt_type: str):
+        """
+        Add a new path from src to dst to the cache, replacing the old
+        path if present
+
+        ## Parameters
+        1. src Src node
+        2. dst Dst node
+        3. path The path between the nodes
+        4. opt_type How the path was optimized
+
+        ## Returns 
+        The old path, if any
+        """
+        if not src in self.path_cache:
+            self.path_cache[src] = {}
+        if not dst in self.path_cache:
+            self.path_cache[dst] = {}
+        old_path = None
+        if dst in self.path_cache[src]:
+            old_path = self.path_cache[src][dst]
+        if src in self.path_cache[dst]:
+            if old_path is None:
+                old_path = self.path_cache[dst][src]
+            else:
+                del self.path_cache[dst][src] #somehow someone inserted couple entries in the cache
+        self.path_cache[src][dst] = (opt_type, copy.deepcopy(path))
+        return old_path
+
+    def cache_get(self, src: NetNode, dst: NetNode, opt_type: str):
+        def get_impl(self, src: NetNode, dst: NetNode, opt_type: str, recursive: bool):
+            if not src in self.path_cache:
+                #Check with dst as first entry in table
+                if not recursive:
+                    return get_impl(self, dst, src, opt_type, True)
+                return None
+
+            #Check with src as first entry in table
+            if not dst in self.path_cache[src]:
+                if not recursive:
+                    return get_impl(self, dst, src, opt_type, True)
+                return None
+            path = self.path_cache[src][dst]
+            if path[0] != opt_type:
+                return None
+            return path[1]
+        return get_impl(self, src, dst, opt_type, False)
+
+    def cache_flatten(self):
+        #flattened_cache = [dst. for dst in list(src.values() for src in self.path_cache.values())]
+        flattened = []
+        for src in self.path_cache.values():
+            for dst in src.values():
+                flattened.append(dst[1])
+        return flattened
+
+    def cache_invalidate_link(self, link: NetLink):
+        inv_paths: list[Tuple[NetHost, NetHost, list[NetLink]]] = []
+        for src, dsts in self.path_cache.items():
+            for dst, path in dsts.items():
+                if link in path[1]:
+                    inv_paths.append((src, dst, path))
+        for src, dst, _ in inv_paths:
+            del self.path_cache[src][dst]
+        return inv_paths
+
+    def cache_invalidate_path(self, src: NetNode, dst: NetNode):
+        def invalidate_path_impl(self, src: NetNode, dst: NetNode, recursive: bool):
+            if not src in self.path_cache:
+                #Check with dst as first entry in table
+                if not recursive:
+                    return invalidate_path_impl(self, dst, src, True)
+                return False
+
+            #Check with src as first entry in table
+            if not dst in self.path_cache[src]:
+                if not recursive:
+                    return invalidate_path_impl(self, dst, src, True)
+                return False
+            del self.path_cache[src][dst]
+            return True
+        return invalidate_path_impl(self, src, dst, False)
+
+    def modify_link(self, link: NetLink, **kwargs):
+        if not link in self.links or len(kwargs) == 0:
+            return []
+        if "bw" not in kwargs.keys() and not "delay" in kwargs.keys():
+            return []
+        index = self.links.index(link)
+        has_to_invalidate = False
+        if "bw" in kwargs.keys() and self.links[index].bw != kwargs["bw"]:
+            self.links[index].bw = kwargs["bw"]
+            has_to_invalidate = True
+
+        if "delay" in kwargs.keys() and self.links[index].delay != kwargs['delay']:
+            self.links[index].delay = kwargs["delay"]
+            has_to_invalidate = True 
+
+        inv_paths = []
+        if has_to_invalidate:
+            inv_paths = self.cache_invalidate_link(link)
+        return inv_paths
+
     
     def add_link(self, link: NetLink):
         if type(link.node0) == NetHost and type(link.node1) == NetHost:
             return
         if link in self.links:
             return
-        self.links.append(link)
+        self.links.append(copy.deepcopy(link))
+        #Maybe invalidate cache? In my mind this is not required, for
+        #now, given that we consider the topology itself to be static,
+        #there should be no need to expect this method to be called
+        #after network init
         return
 
     def add_node(self, node: NetNode):
         if node in self.nodes:
             return
-        self.nodes.append(node)
+        self.nodes.append(copy.deepcopy(node))
+        #Nothing to do here
         return
 
     def contains_node(self, node: NetNode):
@@ -127,25 +244,36 @@ class NetGraph:
         find_path_sub(self, [host1], init_path)
         if len(paths) == 0:
             return None
+        #Do not add to cache, since we do not exactly know which
+        #path is going to be selected
         return paths
 
-    def find_path(self, host1: NetHost, host2: NetHost, opt: str= "none"):
+    def find_path(self, host1: NetHost, host2: NetHost, opt: str= "none", ignore_cache: bool=False):
+        if not ignore_cache:
+            path = self.cache_get(host1, host2, opt)
+            if path != None:
+                return path
+
         opt_options = ["none", "bw", "delay"]
         if not opt in opt_options:
             raise Exception("Invalid optimization")
         paths = self.find_paths(host1, host2)
         if paths == None:
             return None
+        the_path = None
         if opt == "none":
-            return paths[0]
+            the_path = paths[0]
         elif opt == "bw":
             paths.sort(key=lambda path: min(link.bw for link in path), reverse=True)
             if len(paths) > 1:
                 curr_bw = min(link.bw for link in paths[0])
                 paths = list(filter(lambda path: min(link.bw for link in path) == curr_bw, paths)) #Isolate all paths with bw equal to the current top one
                 paths.sort(key=lambda path: sum(link.delay for link in path)) #Also sort them by delay
-            return paths[0]
-        paths.sort(key=lambda path: sum(link.delay for link in path))
+            the_path = paths[0]
+        else:
+            paths.sort(key=lambda path: sum(link.delay for link in path))
+            the_path = paths[0]
+        self._cache_add(host1, host2, the_path, opt)
         return paths[0]
 
 class NetGraphTests(unittest.TestCase):
@@ -214,7 +342,41 @@ class NetGraphTests(unittest.TestCase):
         print()
         print(list(map(lambda link: str(link), path_bw)))
         print(list(map(lambda link: str(link), path_delay)))
-        
+        self.assertEqual(len(graph.cache_flatten()), 1)
+        self.assertEqual(path_delay, graph.cache_get(NetHost('192.168.1.1'), NetHost('192.168.6.1'), "delay"))
+        self.assertEqual(path_delay, graph.cache_get(NetHost('192.168.6.1'), NetHost('192.168.1.1'), "delay"))
+
+    def test_simple_cache(self):
+        host1 = NetHost('192.168.1.1')
+        host2 = NetHost('192.168.1.2')
+        host3 = NetHost('192.168.1.3')
+        sw1 = NetSwitch('0')
+        link1 = NetLink(1, 1, NetHost('192.168.1.1'), NetSwitch('0'), 0, 0)
+        link2 = NetLink(1, 1, NetSwitch('0'), NetHost('192.168.1.2'), 0, 0)
+        link3 = NetLink(1, 1, sw1, host3, 0, 0)
+        graph = NetGraph()
+        graph.add_node(host1)
+        graph.add_node(host2)
+        graph.add_node(host3)
+        graph.add_node(sw1)
+        graph.add_link(link1)
+        graph.add_link(link2)
+        graph.add_link(link3)
+        path1 = graph.find_path(host1, host2)
+        path2 = graph.find_path(host1, host3)
+        path3 = graph.find_path(host2, host3)
+        self.assertNotEqual(path1, None)
+        self.assertNotEqual(path2, None)
+        self.assertNotEqual(path3, None)
+        paths = graph.cache_flatten()
+        print()
+        for path in paths:
+            print(list(map(lambda link: str(link), path)))
+        self.assertEqual(len(paths), 3)
+        self.assertEqual(len(graph.modify_link(link1, bw=2)), 2)
+        self.assertEqual(len(graph.cache_flatten()), 1)
+        self.assertTrue(graph.cache_invalidate_path(host2, host3))
+        self.assertEqual(len(graph.cache_flatten()), 0)
 
 
 if __name__ == "__main__":

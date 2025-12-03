@@ -210,7 +210,17 @@ class NetGraph:
         starting_points = list(filter(lambda link: link.contains_node(host1), self.links))
         if len(starting_points) != 1:
             return None
-        init_path = [starting_points[0]]
+        start = starting_points[0]
+        if host1 == start.node1: #switch the two
+            start = copy.deepcopy(start)
+            temp_node = start.node0
+            start.node0 = start.node1
+            start.node1 = temp_node
+            temp_port = start.port1
+            start.port1 = start.port2
+            start.port2 = temp_port
+
+        init_path = [start]
         def find_path_sub(self: NetGraph, visited_nodes: List[NetNode], curr_path: List[NetLink]):
             curr_link = curr_path[-1]
             next_node = None 

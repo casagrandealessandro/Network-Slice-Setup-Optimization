@@ -17,6 +17,8 @@ import logging
 import typing
 import json
 
+import net_graph
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -67,6 +69,77 @@ class RestServer(wsgi.ControllerBase):
                 return {'status': 'E_INV_SLICE_IPS'}, 400
             slices[slice_name] = slice_ips
         logger.info(f'[REST] Received slices: {json.dumps(slices)}')
+        self.data['slices'] = slices
+        return {'status': 'E_OK'}, 200
+    
+    @route_handler(http_method="POST")
+    def handle_net(self, req: Request, **_kwargs):
+        """
+        Expected format: 
+        node = {"type": 'h/s', "id": "dpid/ip"}
+        link = {"node0": node, "node1": node, "port0": str, "port1": str, "bw": float, "delay": float}
+        {"nodes": [node...], "links": [{"node0": }]}
+        """
+        node_type = typing.Dict[str, str]
+        link_type = typing.Dict[str, typing.Any]
+        body: typing.Dict[str, typing.List] = json.loads(req.body.decode())
+        if type(body) != type({}):
+            logger.error(f'[REST] Invalid body received: {body}')
+            return {'status': 'E_INV_BODY'}, 400
+        if self.data['graph'] != None:
+            logger.error('[REST] Attempting to rewrite topology, not implemented')
+            return {'status': 'E_ALREADY_SET'}, 403
+        if "nodes" not in body:
+            return {'status': 'E_MISSING_NODES'}, 400
+        if "links" not in body:
+            return {'status': 'E_MISSING_LINKS'}, 400
+        graph = net_graph.NetGraph()
+        for index, node in enumerate(body['nodes']):
+            if "type" not in node or "id" not in node:
+                logger.error(f'[REST] Node at index {index} is malformed: {node}')
+                return {'status': 'E_INV_NODE'}, 400
+            if node['type'] == 'h':
+                net_node = net_graph.NetHost(node['id'])
+            elif node['type'] == 's':
+                net_node = net_graph.NetSwitch(node['id'])
+            else:
+                logger.error(f'[REST] Node at index {index} is malformed: {node}')
+                return {'status': 'E_INV_NODE'}, 400
+            if graph.contains_node(net_node):
+                logger.error(f'[REST] Node at index {index} is repeated: {node}')
+                return {'status': 'E_REP_NODE'}, 400
+            graph.add_node(net_node)
+        for index, link in enumerate(body['links']):
+            try:
+                node0 = link['node0']
+                node1 = link['node1']
+                if node0['type'] == 'h':
+                    net_node0 = net_graph.NetHost(node0['id'])
+                elif node0['type'] == 's':
+                    net_node0 = net_graph.NetSwitch(node0['id'])
+                else:
+                    logger.error(f'[REST] Node 0 of link at index {index} is malformed: {node0}')
+                    return {'status': 'E_INV_NODE'}, 400
+                
+                if node1['type'] == 'h':
+                    net_node1 = net_graph.NetHost(node1['id'])
+                elif node1['type'] == 's':
+                    net_node1 = net_graph.NetSwitch(node1['id'])
+                else:
+                    logger.error(f'[REST] Node 1 of link at index {index} is malformed: {node1}')
+                    return {'status': 'E_INV_NODE'}, 400
+                
+                net_link = net_graph.NetLink(link['bw'], link['delay'], net_node0, net_node1, link['port0'], link['port1'])
+                if graph.contains_link(net_link):
+                    logger.error(f'[REST] Link at index {index} is repeated')
+                    return {'status': 'E_REP_LINK'}, 400
+                graph.add_link(net_link)
+            except:
+                logger.exception('[REST] Exception occurred while processing link')
+                return {'status': 'E_INV_LINK'}, 400
+        print(list(map(lambda node: str(node), graph.nodes)))
+        print(list(map(lambda link: str(link), graph.links)))
+        self.data['graph'] = graph
         return {'status': 'E_OK'}, 200
 
 class SliceController(app_manager.RyuApp):
@@ -84,7 +157,9 @@ class SliceController(app_manager.RyuApp):
         self.wsgi: wsgi.WSGIApplication = _kwargs['wsgi']
         self.mapper = self.wsgi.mapper
         self.mapper.connect('/api/v0/slices', controller=RestServer, action='handle_slices', conditions=dict(method=['POST']))
+        self.mapper.connect('/api/v0/graph', controller=RestServer, action='handle_net', conditions=dict(method=['POST']))
         self.wsgi.registory['RestServer'] = self.data
+        self.data['graph'] = None
 
     def add_flow(self, dp: Datapath, match_rule, instructions, prio=0x7FFF, cookie=0):
         ofproto = dp.ofproto

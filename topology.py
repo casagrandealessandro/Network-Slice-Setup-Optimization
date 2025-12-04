@@ -83,6 +83,20 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
         net.stop()
         cleanup()
         return
+    
+    fake_nodes = [{'type': 'h', 'id': '192.168.1.1'}, {'type': 'h', 'id': '192.168.1.2'}, {'type': 's', 'id': '0'}]
+    #{"node0": node, "node1": node, "port0": str, "port1": str, "bw": float, "delay": float}
+    fake_links = [{"node0": fake_nodes[0], "node1": fake_nodes[2], "port0": "0", "port1": "0", "bw": 1, "delay": 1},
+                  {"node0": fake_nodes[2], "node1": fake_nodes[1], "port0": "1", "port1": "0", "bw": 1, "delay": 1}]
+    request_result = requests.post(f'http://{SERVER_IP}:{SERVER_PORT}/api/v0/graph', 
+                                   headers={'ContentType': 'application/json'},
+                                   json={'nodes': fake_nodes, 'links': fake_links})
+    if request_result.status_code != 200:
+        print(f"Server returned status {request_result.status_code}, for net upload")
+        print(f'Body: {request_result.json()}')
+        net.stop()
+        cleanup()
+        return
 
     # ----- EVENTI AMBIENTALI -----
     def environmental_events():

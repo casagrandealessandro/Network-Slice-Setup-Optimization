@@ -203,7 +203,7 @@ class NetGraph:
     def contains_link(self, link: NetLink):
         return link in self.links
 
-    def find_paths(self, host1: NetHost, host2: NetHost):
+    def find_paths(self, host1: NetHost, host2: NetHost, min_bw: float, max_delay: float):
         if host1 == host2:
             return []
         if not host1 in self.nodes or not host2 in self.nodes:
@@ -222,8 +222,11 @@ class NetGraph:
             start.port1 = start.port2
             start.port2 = temp_port
 
+        if start.bw < min_bw or start.delay > max_delay:
+            return None
+
         init_path = [start]
-        def find_path_sub(self: NetGraph, visited_nodes: List[NetNode], curr_path: List[NetLink]):
+        def find_path_sub(self: NetGraph, visited_nodes: List[NetNode], curr_path: List[NetLink], curr_min_bw: float, curr_delay: float):
             curr_link = curr_path[-1]
             next_node = None 
             if curr_link.node0 in visited_nodes:
@@ -252,24 +255,36 @@ class NetGraph:
                     link.port1 = link.port2
                     link.port2 = temp_port
                 new_path.append(link)
-                find_path_sub(self, copy.deepcopy(visited_nodes), new_path)
-        find_path_sub(self, [host1], init_path)
+                next_min_bw = min(curr_min_bw, float(link.bw))
+                next_delay = curr_delay + link.delay
+                if next_min_bw >= min_bw and next_delay <= max_delay:
+                    find_path_sub(self, copy.deepcopy(visited_nodes), new_path, next_min_bw, next_delay)
+        find_path_sub(self, [host1], init_path, start.bw, start.delay)
         if len(paths) == 0:
             return None
         #Do not add to cache, since we do not exactly know which
         #path is going to be selected
         return paths
 
-    def find_path(self, host1: NetHost, host2: NetHost, opt: str= "none", ignore_cache: bool=False):
+    def find_path(self, host1: NetHost, host2: NetHost, **kwargs):
+        opt = "none" if "opt" not in kwargs else kwargs["opt"]
+        ignore_cache = False if "ignore_cache" not in kwargs else kwargs["ignore_cache"]
+        min_bw = 0 if "min_bw" not in kwargs else kwargs["min_bw"]
+        max_delay = float('inf') if "max_delay" not in kwargs else kwargs["max_delay"]
         if not ignore_cache:
-            path = self.cache_get(host1, host2, opt)
+            path: list[NetLink] = self.cache_get(host1, host2, opt)
             if path != None:
-                return path
+                curr_min_bw = min(link.bw for link in path)
+                curr_delay = sum(link.delay for link in path)
+                if curr_min_bw < min_bw or curr_delay > max_delay:
+                    self.cache_invalidate_path(host1, host2)
+                else:
+                    return path
 
         opt_options = ["none", "bw", "delay", "hops"]
         if not opt in opt_options:
             raise Exception("Invalid optimization")
-        paths = self.find_paths(host1, host2)
+        paths = self.find_paths(host1, host2, min_bw, max_delay)
         if paths == None:
             return None
         the_path = None
@@ -392,6 +407,27 @@ class NetGraphTests(unittest.TestCase):
         self.assertEqual(len(graph.cache_flatten()), 1)
         self.assertTrue(graph.cache_invalidate_path(host2, host3))
         self.assertEqual(len(graph.cache_flatten()), 0)
+
+    def test_path_reqs(self):
+        host1 = NetHost('192.168.1.1')
+        host2 = NetHost('192.168.1.2')
+        host3 = NetHost('192.168.1.3')
+        sw1 = NetSwitch('0')
+        link1 = NetLink(1, 1, NetHost('192.168.1.1'), NetSwitch('0'), 0, 0)
+        link2 = NetLink(1, 1, NetSwitch('0'), NetHost('192.168.1.2'), 0, 0)
+        link3 = NetLink(1, 1, sw1, host3, 0, 0)
+        graph = NetGraph()
+        graph.add_node(host1)
+        graph.add_node(host2)
+        graph.add_node(host3)
+        graph.add_node(sw1)
+        graph.add_link(link1)
+        graph.add_link(link2)
+        graph.add_link(link3)
+        self.assertEqual(graph.find_path(host1, host2, min_bw=2), None)
+        self.assertNotEqual(graph.find_path(host1, host2, min_bw=1), None)
+        self.assertEqual(graph.find_path(host1, host2, max_delay=1), None)
+        self.assertNotEqual(graph.find_path(host1, host2, max_delay=2), None)
 
 
 if __name__ == "__main__":

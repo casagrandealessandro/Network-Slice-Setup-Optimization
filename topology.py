@@ -13,6 +13,7 @@ from mininet.log import setLogLevel
 from mininet.clean import cleanup
 
 import requests
+import queues
 
 SERVER_IP = '127.0.0.1'
 SERVER_PORT = 8080
@@ -42,7 +43,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     # ----- SPINE SWITCHES -----
     spine_switches = []
     for i in range(K):
-        spine = net.addSwitch(f"s_spine_{i+1}", dpid=f"1{i+1:03d}")
+        spine = net.addSwitch(f"s_spine_{i+1}", dpid=f"1{i+1:03d}", datapath='osvk', protocols='OpenFlow13')
         spine_switches.append(spine)
 
     # ----- LEAF SWITCHES -----
@@ -50,18 +51,18 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     uplink_factor = 2  # change this to tune redundancy
 
     for i in range(2 * K):
-        leaf = net.addSwitch(f"s_leaf_{i+1}", dpid=f"2{i+1:03d}")
+        leaf = net.addSwitch(f"s_leaf_{i+1}", dpid=f"2{i+1:03d}", datapath='osvk', protocols='OpenFlow13')
         leaf_switches.append(leaf)
 
         # Connect leaf to a subset of spines
         selected_spines = random.sample(spine_switches, min(uplink_factor, K))
         for spine in selected_spines:
-             net.addLink(spine, leaf, bw=100, delay="5ms")
+             net.addLink(spine, leaf, delay="5ms")
 
         # Add hosts
         for _ in range(K):
             host = net.addHost(f"h{len(net.hosts) + 1}")
-            net.addLink(host, leaf, bw=50)
+            net.addLink(host, leaf)
 
 
     net.start()
@@ -158,6 +159,27 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
         net.stop()
         cleanup()
         return
+    
+    if not queues.load_queues('./qos.json', net.switches, SERVER_IP, SERVER_PORT, 100e6):
+        print("QoS load failed")
+        net.stop()
+        cleanup()
+        queues.clear_queues()
+        return
+
+    request_result = requests.post(
+        f"http://{SERVER_IP}:{SERVER_PORT}/api/v0/init",
+        headers={'ContentType': 'application/json'},
+        json={'default_qos': 0}
+    )
+
+    if request_result.status_code != 200:
+        print(f"Server returned status {request_result.status_code}, while trying to finalize init")
+        print(f"Body: {request_result.json()}")
+        net.stop()
+        cleanup()
+        queues.clear_queues()
+        return
 
     # ----- ENVIRONMENTAL EVENTS -----
     def environmental_events():
@@ -184,6 +206,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     CLI(net)
     net.stop()
     cleanup()
+    queues.clear_queues()
 
 
 if __name__ == "__main__":

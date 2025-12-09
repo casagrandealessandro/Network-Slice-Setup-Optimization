@@ -1,5 +1,5 @@
 from ryu.base import app_manager
-from ryu.controller import ofp_event
+from ryu.controller import ofp_event, dpset
 from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.controller.controller import Datapath
@@ -50,6 +50,10 @@ def route_handler(http_method: str):
                 )
         return wrapper
     return route_handler_wrap
+
+class InitEvent(ofp_event.event.EventBase):
+    def __init__(self):
+        super().__init__()
 
 class RestServer(wsgi.ControllerBase):
     def __init__(self, req, link, data: typing.Dict, **config):
@@ -183,26 +187,46 @@ class RestServer(wsgi.ControllerBase):
         self.data['qos'] = body
         logger.info(f'[REST] Received queues: {body}')
         return {'status': 'E_OK'}, 200
+    
+    @route_handler(http_method="POST")
+    def handle_init_end(self, req: Request, **_kwargs):
+        body: typing.Dict[str, typing.Any] = json.loads(req.body.decode())
+        if not isinstance(body, type({})):
+            logger.error(f'[REST] Invalid body received: {body}')
+            return {'status': 'E_INV_BODY'}, 400
+        if not "default_qos" in body:
+            logger.error(f'[REST] Missing default QoS')
+            return {'status': 'E_MISSING_QOS'}, 400
+        if not isinstance(body['default_qos'], int):
+            logger.error(f'[REST] Invalid default QoS')
+            return {'status': 'E_INV_QOS'}, 400
+        self.data['default_qos'] = int(body['default_qos'])
+        app: app_manager.RyuApp = self.data['app']
+        app.send_event('SliceController', InitEvent())
+        return {'status': 'E_OK'}, 200
 
 class SliceController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
     _CONTEXTS = {
-        'wsgi': wsgi.WSGIApplication
+        'wsgi': wsgi.WSGIApplication,
+        'dpset': dpset.DPSet
     }
 
     def __init__(self, *_args, **_kwargs):
         super(SliceController, self).__init__(*_args, **_kwargs)
         #All datapaths, needed to contact switches
         self.data: typing.Dict[str, typing.Any] = {}
-        self.dpaths = []
+        self.dpaths: dpset.DPSet = _kwargs['dpset']
         self.wsgi: wsgi.WSGIApplication = _kwargs['wsgi']
         self.mapper = self.wsgi.mapper
         self.mapper.connect('/api/v0/slices', controller=RestServer, action='handle_slices', conditions=dict(method=['POST']))
         self.mapper.connect('/api/v0/graph', controller=RestServer, action='handle_net', conditions=dict(method=['POST']))
         self.mapper.connect('/api/v0/qos', controller=RestServer, action='handle_qos', conditions=dict(method=['POST']))
+        self.mapper.connect('/api/v0/init', controller=RestServer, action='handle_init_end', conditions=dict(method=['POST']))
         self.wsgi.registory['RestServer'] = self.data
         self.data['graph'] = None
+        self.data['app'] = self
 
     def add_flow(self, dp: Datapath, match_rule, instructions, prio=0x7FFF, cookie=0):
         ofproto = dp.ofproto
@@ -224,8 +248,8 @@ class SliceController(app_manager.RyuApp):
         switch and installs a fallback flow rule 
         """
         dp: Datapath = ev.msg.datapath
-        if dp not in self.dpaths:
-            self.dpaths.append(dp)
+        #if dp.id not in self.dpaths:
+        #    self.dpaths[dp.id] = dp
         ofproto = dp.ofproto
         parser = dp.ofproto_parser
         match_rule = parser.OFPMatch() 
@@ -233,6 +257,7 @@ class SliceController(app_manager.RyuApp):
         instruction = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, \
                                                     action)]
         self.add_flow(dp, match_rule, instruction, 0)
+        self.data['dpaths'] = self.dpaths
         return
     
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
@@ -253,6 +278,66 @@ class SliceController(app_manager.RyuApp):
 
         if _eth.ethertype == ether_types.ETH_TYPE_LLDP:
             return
-        
-        
+        return
+    
+    def create_route(self, links: typing.List[net_graph.NetLink], begin: net_graph.NetHost, end: net_graph.NetHost, qos: int):
+        for link, next_link in zip(links, links[1:]):
+            if isinstance(next_link.node0, net_graph.NetHost):
+                logger.error('[CONTROLLER] Unexpected sequence in path')
+                raise Exception("Invalid path")
+            logger.info(f'Add {begin} -> {end} to {link.node1.dpid}, in port: {link.port2}, out port: {next_link.port1}')
+            dpid = int(link.node1.dpid, 16)
+            dp: Datapath = self.dpaths.get(dpid)
+            if dp is None:
+                logger.info(f'But datapath has not been registered?')
+                raise Exception("Invalid dpid")
+            ofproto = dp.ofproto
+            parser = dp.ofproto_parser
+            #First direction
+            matches = parser.OFPMatch(in_port=int(link.port2), ipv4_src=begin.ip, ipv4_dst=end.ip, eth_type=0x800)
+            actions = [parser.OFPActionSetQueue(qos), parser.OFPActionOutput(int(next_link.port1))]
+            instruction = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, \
+                                                    actions)]
+            self.add_flow(dp, matches, instruction, 10)
+            #Opposite direction
+            matches = parser.OFPMatch(in_port=int(next_link.port1), ipv4_src=end.ip, ipv4_dst=begin.ip, eth_type=0x800)
+            actions = [parser.OFPActionSetQueue(qos), parser.OFPActionOutput(int(link.port2))]
+            instruction = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, \
+                                                    actions)]
+            self.add_flow(dp, matches, instruction, 10)
+            
+            #Repeat for ARP packets
+            
+            #First direction
+            matches = parser.OFPMatch(in_port=int(link.port2), arp_spa=begin.ip, arp_tpa=end.ip, eth_type=0x0806)
+            actions = [parser.OFPActionSetQueue(qos), parser.OFPActionOutput(int(next_link.port1))]
+            instruction = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, \
+                                                    actions)]
+            self.add_flow(dp, matches, instruction, 10)
+            #Opposite direction
+            matches = parser.OFPMatch(in_port=int(next_link.port1), arp_spa=end.ip, arp_tpa=begin.ip, eth_type=0x0806)
+            actions = [parser.OFPActionSetQueue(qos), parser.OFPActionOutput(int(link.port2))]
+            instruction = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, \
+                                                    actions)]
+            self.add_flow(dp, matches, instruction, 10)
+        return
+    
+    @set_ev_cls(InitEvent, MAIN_DISPATCHER)
+    def init_handler(self, ev: ofp_event.EventOFPMsgBase):
+        logger.info('[CONTROLLER] Init event')
+        created_paths: typing.Dict[typing.Tuple[str, str], typing.List] = {}
+        slices: typing.Dict[str, typing.List[str]] = self.data['slices']
+        graph: net_graph.NetGraph = self.data['graph']
+        for slice_name, hosts in slices.items():
+            for host in hosts:
+                for other_host in hosts:
+                    if other_host is host:
+                        continue
+                    if (host, other_host) in created_paths or (other_host, host) in created_paths:
+                        continue
+                    created_paths[(host, other_host)] = graph.find_path(net_graph.NetHost(host), net_graph.NetHost(other_host), opt="hops")
+                    if created_paths[(host, other_host)] != None:
+                        self.create_route(created_paths[(host, other_host)], net_graph.NetHost(host), net_graph.NetHost(other_host), 2)
+                    else:
+                        logger.info(f'{host} -> {other_host} not possible')      
         return

@@ -49,6 +49,8 @@ class NetLink:
         self.node1 = node1
         self.port1 = port1
         self.port2 = port2
+        self.port1_down = False 
+        self.port2_down = False
     
     def __str__(self):
         return f'Link({self.node0} -> {self.node1})'
@@ -61,6 +63,14 @@ class NetLink:
 
     def contains_node(self, node: NetNode):
         return self.node0 == node or self.node1 == node
+    
+    def is_down(self):
+        return self.port1_down or self.port2_down
+    
+    def exchange_nodes(self):
+        self.node0, self.node1 = self.node1, self.node0
+        self.port1, self.port2 = self.port2, self.port1
+        self.port1_down, self.port2_down = self.port2_down, self.port1_down
 
 class NetGraph:
     def __init__(self):
@@ -160,7 +170,7 @@ class NetGraph:
     def modify_link(self, link: NetLink, **kwargs):
         if not link in self.links or len(kwargs) == 0:
             return []
-        if "bw" not in kwargs.keys() and not "delay" in kwargs.keys():
+        if "bw" not in kwargs.keys() and not "delay" in kwargs.keys() and not "port1_down" in kwargs.keys() and not "port2_down" in kwargs.keys():
             return []
         index = self.links.index(link)
         has_to_invalidate = False
@@ -171,6 +181,14 @@ class NetGraph:
         if "delay" in kwargs.keys() and self.links[index].delay != kwargs['delay']:
             self.links[index].delay = kwargs["delay"]
             has_to_invalidate = True 
+
+        if "port1_down" in kwargs.keys() and self.links[index].port1_down != kwargs['port1_down']:
+            self.links[index].port1_down = kwargs['port1_down']
+            has_to_invalidate = True
+
+        if "port2_down" in kwargs.keys() and self.links[index].port2_down != kwargs['port2_down']:
+            self.links[index].port2_down = kwargs['port2_down']
+            has_to_invalidate = True
 
         inv_paths = []
         if has_to_invalidate:
@@ -230,14 +248,9 @@ class NetGraph:
         start = starting_points[0]
         if host1 == start.node1: #switch the two
             start = copy.deepcopy(start)
-            temp_node = start.node0
-            start.node0 = start.node1
-            start.node1 = temp_node
-            temp_port = start.port1
-            start.port1 = start.port2
-            start.port2 = temp_port
+            start.exchange_nodes()
 
-        if start.bw < min_bw or start.delay > max_delay:
+        if start.bw < min_bw or start.delay > max_delay or start.is_down():
             return None
 
         init_path = [start]
@@ -263,16 +276,11 @@ class NetGraph:
                                             #like we are going in the wrong direction of the link.
                                             #I will simply swap the two nodes (and the ports)
                     link = copy.deepcopy(link)
-                    temp = link.node0
-                    link.node0 = link.node1
-                    link.node1 = temp
-                    temp_port = link.port1
-                    link.port1 = link.port2
-                    link.port2 = temp_port
+                    link.exchange_nodes()
                 new_path.append(link)
                 next_min_bw = min(curr_min_bw, float(link.bw))
                 next_delay = curr_delay + link.delay
-                if next_min_bw >= min_bw and next_delay <= max_delay:
+                if next_min_bw >= min_bw and next_delay <= max_delay and not link.is_down():
                     find_path_sub(self, copy.deepcopy(visited_nodes), new_path, next_min_bw, next_delay)
         find_path_sub(self, [host1], init_path, start.bw, start.delay)
         if len(paths) == 0:

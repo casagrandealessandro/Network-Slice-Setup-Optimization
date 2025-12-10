@@ -8,7 +8,7 @@ import logging
 import requests
 import subprocess
 
-def load_queues(qos_file: str, switches: List[Tuple[str, OVSSwitch]], controller_ip: str, controller_port: str, default_bw: float = 1e6, default_delay=5):
+def load_queues(qos_file: str, switches: List[Tuple[str, OVSSwitch]], controller_ip: str, controller_port: str, default_bw: float = 10, default_delay=5):
     with open(qos_file) as qos_fd:
         print(f'Load queue: file {qos_file} opened')
         try:
@@ -81,7 +81,7 @@ def load_queues(qos_file: str, switches: List[Tuple[str, OVSSwitch]], controller
             for intf in interfaces:
                 if intf.name == 'lo':
                     continue
-                bw = try_parsing("bw", intf.params, bw_mult, bw_strings, default_bw)
+                bw = try_parsing("custom_bw", intf.params, bw_mult, bw_strings, default_bw)
                 delay = try_parsing("delay", intf.params, delay_mult, delay_strings, default_delay)
                 print(f'bw: {bw}, delay: {delay}')
                 

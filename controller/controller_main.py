@@ -16,6 +16,7 @@ from ryu.app.wsgi import Request, Response
 import logging
 import typing
 import json
+import copy
 
 import net_graph
 
@@ -52,6 +53,10 @@ def route_handler(http_method: str):
     return route_handler_wrap
 
 class InitEvent(ofp_event.event.EventBase):
+    def __init__(self):
+        super().__init__()
+
+class ShutdownEvent(ofp_event.event.EventBase):
     def __init__(self):
         super().__init__()
 
@@ -204,6 +209,12 @@ class RestServer(wsgi.ControllerBase):
         app: app_manager.RyuApp = self.data['app']
         app.send_event('SliceController', InitEvent())
         return {'status': 'E_OK'}, 200
+    
+    @route_handler(http_method="POST")
+    def handle_shutdown(self, req: Request, **_kwargs):
+        app: app_manager.RyuApp = self.data['app']
+        app.send_event('SliceController', ShutdownEvent())
+        return {'status': 'E_OK'}, 200
 
 class SliceController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -219,11 +230,16 @@ class SliceController(app_manager.RyuApp):
         self.data: typing.Dict[str, typing.Any] = {}
         self.dpaths: dpset.DPSet = _kwargs['dpset']
         self.wsgi: wsgi.WSGIApplication = _kwargs['wsgi']
+        self.created_paths: typing.Dict[typing.Tuple[str, str], typing.List] = {}
+        self.path_cookies: typing.Dict[typing.Tuple[str, str], typing.List[typing.Tuple[net_graph.NetSwitch, typing.List[int]]]] = {}
+        self.path_qos: typing.Dict[typing.Tuple[str, str], int] = {}
+        self.curr_cookie: int = 0
         self.mapper = self.wsgi.mapper
         self.mapper.connect('/api/v0/slices', controller=RestServer, action='handle_slices', conditions=dict(method=['POST']))
         self.mapper.connect('/api/v0/graph', controller=RestServer, action='handle_net', conditions=dict(method=['POST']))
         self.mapper.connect('/api/v0/qos', controller=RestServer, action='handle_qos', conditions=dict(method=['POST']))
         self.mapper.connect('/api/v0/init', controller=RestServer, action='handle_init_end', conditions=dict(method=['POST']))
+        self.mapper.connect('/api/v0/shutdown', controller=RestServer, action='handle_shutdown', conditions=dict(method=['POST']))
         self.wsgi.registory['RestServer'] = self.data
         self.data['graph'] = None
         self.data['app'] = self
@@ -235,6 +251,21 @@ class SliceController(app_manager.RyuApp):
             datapath=dp, match=match_rule, priority=prio,
             command=ofproto.OFPFC_ADD, instructions=instructions,
             cookie=cookie
+        )
+        dp.send_msg(flow_mod)
+        return
+    
+    def remove_flow(self, dp: Datapath, match_rule, instructions, prio=0x7FFF, cookie=0, cookie_mask= 0xFFFFFFFFFFFFFFFF, table_id=ofproto_v1_3.OFPTT_ALL, out_port=ofproto_v1_3.OFPP_ANY, out_group=ofproto_v1_3.OFPG_ANY):
+        ofproto = dp.ofproto
+        parser = dp.ofproto_parser
+        flow_mod = parser.OFPFlowMod(
+            datapath=dp, match=match_rule, priority=prio,
+            command=ofproto.OFPFC_DELETE, instructions=instructions,
+            cookie=cookie,
+            table_id=table_id,
+            out_port=out_port,
+            out_group=out_group,
+            cookie_mask=cookie_mask
         )
         dp.send_msg(flow_mod)
         return
@@ -280,12 +311,12 @@ class SliceController(app_manager.RyuApp):
             return
         return
     
-    def create_route(self, links: typing.List[net_graph.NetLink], begin: net_graph.NetHost, end: net_graph.NetHost, qos: int):
+    def create_route_flows(self, links: typing.List[net_graph.NetLink], begin: net_graph.NetHost, end: net_graph.NetHost, qos: int, cookies: typing.List[typing.Tuple[net_graph.NetSwitch, typing.List[int]]]):
         for link, next_link in zip(links, links[1:]):
             if isinstance(next_link.node0, net_graph.NetHost):
                 logger.error('[CONTROLLER] Unexpected sequence in path')
                 raise Exception("Invalid path")
-            logger.info(f'Add {begin} -> {end} to {link.node1.dpid}, in port: {link.port2}, out port: {next_link.port1}')
+            logger.info(f'Add {begin} -> {end} to {link.node1.dpid}, in port: {link.port2}, out port: {next_link.port1}, first delay: {link.delay}, second delay: {next_link.delay}')
             dpid = int(link.node1.dpid, 16)
             dp: Datapath = self.dpaths.get(dpid)
             if dp is None:
@@ -298,13 +329,13 @@ class SliceController(app_manager.RyuApp):
             actions = [parser.OFPActionSetQueue(qos), parser.OFPActionOutput(int(next_link.port1))]
             instruction = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, \
                                                     actions)]
-            self.add_flow(dp, matches, instruction, 10)
+            self.add_flow(dp, matches, instruction, 10, cookie=self.curr_cookie)
             #Opposite direction
             matches = parser.OFPMatch(in_port=int(next_link.port1), ipv4_src=end.ip, ipv4_dst=begin.ip, eth_type=0x800)
             actions = [parser.OFPActionSetQueue(qos), parser.OFPActionOutput(int(link.port2))]
             instruction = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, \
                                                     actions)]
-            self.add_flow(dp, matches, instruction, 10)
+            self.add_flow(dp, matches, instruction, 10, cookie=self.curr_cookie + 1)
             
             #Repeat for ARP packets
             
@@ -313,31 +344,118 @@ class SliceController(app_manager.RyuApp):
             actions = [parser.OFPActionSetQueue(qos), parser.OFPActionOutput(int(next_link.port1))]
             instruction = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, \
                                                     actions)]
-            self.add_flow(dp, matches, instruction, 10)
+            self.add_flow(dp, matches, instruction, 10, cookie=self.curr_cookie + 2)
             #Opposite direction
             matches = parser.OFPMatch(in_port=int(next_link.port1), arp_spa=end.ip, arp_tpa=begin.ip, eth_type=0x0806)
             actions = [parser.OFPActionSetQueue(qos), parser.OFPActionOutput(int(link.port2))]
             instruction = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, \
                                                     actions)]
-            self.add_flow(dp, matches, instruction, 10)
+            self.add_flow(dp, matches, instruction, 10, cookie=self.curr_cookie + 3)
+            cookies.append((copy.deepcopy(link.node1), [self.curr_cookie, self.curr_cookie + 1, self.curr_cookie + 2, self.curr_cookie + 3]))
+            self.curr_cookie += 4
         return
+    
+    def remove_route_flows(self, begin: net_graph.NetHost, end: net_graph.NetHost, cookies: typing.List[typing.Tuple[net_graph.NetSwitch, typing.List[int]]]):
+        for switch, cookie_list in cookies:
+            dpid = int(switch.dpid, 16)
+            dp: Datapath = self.dpaths.get(dpid)
+            if dp is None:
+                logger.info(f'But datapath has not been registered?')
+                raise Exception("Invalid dpid")
+            #ofproto = dp.ofproto
+            #parser = dp.ofproto_parser
+            #matches = parser.OFPMatch() #Match any
+            #actions = []
+            #instruction = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, \
+            #                                        actions)]
+            logger.info(f"Remove {begin} -> {end} from {switch}")
+            for cookie in cookie_list:
+                self.remove_flow(dp, None, None, cookie=cookie)
+        return
+
+    def create_route(self, begin: net_graph.NetHost, end: net_graph.NetHost, qos: int, best_effort: bool):
+        if begin == end:
+            return True
+        if (begin.ip, end.ip) in self.created_paths or (end.ip, begin.ip) in self.created_paths:
+            return True
+        qos_config: list[typing.Dict[str, typing.Any]] = self.data['qos']
+        logger.info(f"{begin} -> {end}, max delay: {qos_config[qos]['max_delay']}, min bw: {qos_config[qos]['min_bw']}")
+        self.created_paths[(begin.ip, end.ip)] = self.data['graph'].find_path(begin, end, opt="hops", max_delay=qos_config[qos]["max_delay"], min_bw=qos_config[qos]['min_bw'])
+        if self.created_paths[(begin.ip, end.ip)] == None:
+            logger.info(f'QoS requirements not met')
+            if best_effort:
+                logger.info(f'Attempting best effort')
+                self.created_paths[(begin.ip, end.ip)] = self.data['graph'].find_path(begin, end, opt="hops")
+        if self.created_paths[(begin.ip, end.ip)] != None:
+            self.path_cookies[(begin.ip, end.ip)] = []
+            self.create_route_flows(self.created_paths[(begin.ip, end.ip)], begin, end, qos, self.path_cookies[(begin.ip, end.ip)])
+        else:
+            del self.created_paths[(begin.ip, end.ip)]
+            return False
+        self.path_qos[(begin.ip, end.ip)] = qos
+        return True
+    
+    def remove_route(self, begin: net_graph.NetHost, end: net_graph.NetHost):
+        if begin == end:
+            return True
+        if (begin.ip, end.ip) not in self.created_paths and (end.ip, begin.ip) not in self.created_paths:
+            return True
+        if (end.ip, begin.ip) in self.created_paths:
+            temp_host = begin 
+            begin = end 
+            end = temp_host
+        if (begin.ip, end.ip) not in self.path_cookies:
+            raise Exception(f"path_cookies does not contain {begin} -> {end}")
+        logger.info(f"Delete path {begin} -> {end}")
+        self.remove_route_flows(begin, end, self.path_cookies[(begin.ip, end.ip)])
+        del self.path_cookies[(begin.ip, end.ip)]
+        del self.created_paths[(begin.ip, end.ip)]
+        del self.path_qos[(begin.ip, end.ip)]
+        return True
     
     @set_ev_cls(InitEvent, MAIN_DISPATCHER)
     def init_handler(self, ev: ofp_event.EventOFPMsgBase):
         logger.info('[CONTROLLER] Init event')
-        created_paths: typing.Dict[typing.Tuple[str, str], typing.List] = {}
         slices: typing.Dict[str, typing.List[str]] = self.data['slices']
-        graph: net_graph.NetGraph = self.data['graph']
         for slice_name, hosts in slices.items():
             for host in hosts:
                 for other_host in hosts:
-                    if other_host is host:
-                        continue
-                    if (host, other_host) in created_paths or (other_host, host) in created_paths:
-                        continue
-                    created_paths[(host, other_host)] = graph.find_path(net_graph.NetHost(host), net_graph.NetHost(other_host), opt="hops")
-                    if created_paths[(host, other_host)] != None:
-                        self.create_route(created_paths[(host, other_host)], net_graph.NetHost(host), net_graph.NetHost(other_host), 2)
-                    else:
+                    success = self.create_route(net_graph.NetHost(host), net_graph.NetHost(other_host), self.data['default_qos'], False)
+                    if not success:
+                        success = self.create_route(net_graph.NetHost(host), net_graph.NetHost(other_host), self.data['default_qos'], True)
+                    if not success:
                         logger.info(f'{host} -> {other_host} not possible')      
+        #path_list = [(begin, end) for begin, end in self.created_paths.keys()]
+        #self.remove_route(net_graph.NetHost(path_list[0][0]), net_graph.NetHost(path_list[0][1]))
+        return
+    
+    @set_ev_cls(ShutdownEvent, MAIN_DISPATCHER)
+    def shutdown_handler(self, ev: ofp_event.EventOFPMsgBase):
+        logger.info('[CONTROLLER] Shutdown event')
+        for host_pair, _path in copy.deepcopy(self.created_paths).items():
+            self.remove_route(net_graph.NetHost(host_pair[0]), net_graph.NetHost(host_pair[1]))
+        if len(self.created_paths) != 0:
+            raise Exception("Not all paths deleted!")
+        del self.data['qos']
+        del self.data['slices']
+        del self.data['graph']
+
+    
+    @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
+    def port_state_change_handler(self, ev: ofp_event.EventOFPMsgBase):
+        msg = ev.msg
+        dp = msg.datapath
+        ofp = dp.ofproto
+
+        if msg.reason == ofp.OFPPR_ADD:
+            reason = 'ADD'
+        elif msg.reason == ofp.OFPPR_DELETE:
+            reason = 'DELETE'
+        elif msg.reason == ofp.OFPPR_MODIFY:
+            reason = 'MODIFY'
+        else:
+            reason = 'unknown'
+
+        logger.info('OFPPortStatus received: reason=%s desc=%s',
+                          reason, msg.desc)
         return

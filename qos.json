@@ -1,5 +1,5 @@
 [
-    {"min_bw": "10", "max_bw": "20", "min_delay": "5ms", "max_delay": "5ms"},
-    {"min_bw": "20", "max_bw": "30", "min_delay": "5ms", "max_delay": "5ms"},
-    {"min_bw": "30", "max_bw": "40", "min_delay": "5ms", "max_delay": "5ms"}
+    {"min_bw": "10", "max_bw": "20", "min_delay": "5ms", "max_delay": "10ms"},
+    {"min_bw": "20", "max_bw": "30", "min_delay": "5ms", "max_delay": "10ms"},
+    {"min_bw": "30", "max_bw": "40", "min_delay": "5ms", "max_delay": "10ms"}
 ]

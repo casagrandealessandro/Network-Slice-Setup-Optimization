@@ -57,12 +57,12 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
         # Connect leaf to a subset of spines
         selected_spines = random.sample(spine_switches, min(uplink_factor, K))
         for spine in selected_spines:
-             net.addLink(spine, leaf, delay="5ms")
+             net.addLink(spine, leaf, delay="5ms", custom_bw="100")
 
         # Add hosts
         for _ in range(K):
             host = net.addHost(f"h{len(net.hosts) + 1}")
-            net.addLink(host, leaf)
+            net.addLink(host, leaf, custom_bw="50")
 
 
     net.start()
@@ -128,7 +128,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
 
         # Extract TCLink parameters
         params = intf1.params
-        bw = params.get("bw", 100)
+        bw = params.get("custom_bw", 100)
         delay = params.get("delay", "0ms")
 
         links.append({
@@ -200,10 +200,17 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
                 net.configLinkStatus(spine.name, leaf.name, "up")
                 print(f"Link state after up: {link.intf1.status()} - {link.intf2.status()}")
 
-    # event_thread = threading.Thread(target=environmental_events, daemon=True)
-    # event_thread.start()
+    #event_thread = threading.Thread(target=environmental_events, daemon=True)
+    #event_thread.start()
 
     CLI(net)
+
+    request_result = requests.post(
+        f"http://{SERVER_IP}:{SERVER_PORT}/api/v0/shutdown",
+        headers={'ContentType': 'application/json'},
+        json={}
+    )
+
     net.stop()
     cleanup()
     queues.clear_queues()
@@ -211,4 +218,4 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
 
 if __name__ == "__main__":
     setLogLevel("info")
-    scalable_topology(K=3, T=15, auto_recover=True, num_slices=3)
+    scalable_topology(K=3, T=15, auto_recover=False, num_slices=3)

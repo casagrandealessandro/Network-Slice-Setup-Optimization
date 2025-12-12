@@ -66,6 +66,8 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
 
 
     net.start()
+    # This will make sure that the REST server will be up
+    # by the time we use it
     net.waitConnected()
 
     # ----- DYNAMIC SLICE CREATION -----
@@ -87,6 +89,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     with open("slices.json", "w") as f:
         json.dump(slices, f)
 
+    # Send slices to controller
     request_result = requests.post(
         f"http://{SERVER_IP}:{SERVER_PORT}/api/v0/slices",
         headers={'ContentType': 'application/json'},
@@ -160,6 +163,8 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
         cleanup()
         return
     
+    # Attempt to load QoS from file, configure them on the switches and send them
+    # to the controller
     if not queues.load_queues('./qos.json', net.switches, SERVER_IP, SERVER_PORT, 100e6):
         print("QoS load failed")
         net.stop()
@@ -167,6 +172,8 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
         queues.clear_queues()
         return
 
+    # Send network init to controller. The controller will
+    # then setup flows and other things
     request_result = requests.post(
         f"http://{SERVER_IP}:{SERVER_PORT}/api/v0/init",
         headers={'ContentType': 'application/json'},
@@ -205,6 +212,8 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
 
     CLI(net)
 
+    # Request that the controller destroys the current network
+    # state
     request_result = requests.post(
         f"http://{SERVER_IP}:{SERVER_PORT}/api/v0/shutdown",
         headers={'ContentType': 'application/json'},

@@ -215,6 +215,21 @@ class RestServer(wsgi.ControllerBase):
         app: app_manager.RyuApp = self.data['app']
         app.send_event('SliceController', ShutdownEvent())
         return {'status': 'E_OK'}, 200
+    
+    @route_handler(http_method="POST")
+    def handle_service_create(self, req: Request, **_kwargs):
+        #put service in list, attempt routing
+        return {'status': 'E_OK'}, 200
+    
+    @route_handler(http_method="GET")
+    def handle_service_get(self, req: Request, **_kwargs):
+        #get list of services
+        return {'status': 'E_OK'}, 200
+    
+    @route_handler(http_method="DELETE")
+    def handle_service_remove(self, req: Request, **_kwargs):
+        #remove a service
+        return {'status': 'E_OK'}, 200
 
 class SliceController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -233,6 +248,8 @@ class SliceController(app_manager.RyuApp):
         self.created_paths: typing.Dict[typing.Tuple[str, str], typing.List] = {}
         self.path_cookies: typing.Dict[typing.Tuple[str, str], typing.List[typing.Tuple[net_graph.NetSwitch, typing.List[int]]]] = {}
         self.path_qos: typing.Dict[typing.Tuple[str, str], int] = {}
+        self.unrouted_paths: typing.Dict[typing.Tuple[str, str], int] = {}
+        self.paths_without_qos: typing.Dict[typing.Tuple[str, str], int] = {}
         self.curr_cookie: int = 0
         self.mapper = self.wsgi.mapper
         self.mapper.connect('/api/v0/slices', controller=RestServer, action='handle_slices', conditions=dict(method=['POST']))
@@ -240,6 +257,9 @@ class SliceController(app_manager.RyuApp):
         self.mapper.connect('/api/v0/qos', controller=RestServer, action='handle_qos', conditions=dict(method=['POST']))
         self.mapper.connect('/api/v0/init', controller=RestServer, action='handle_init_end', conditions=dict(method=['POST']))
         self.mapper.connect('/api/v0/shutdown', controller=RestServer, action='handle_shutdown', conditions=dict(method=['POST']))
+        self.mapper.connect('/api/v0/service/create', controller=RestServer, action='handle_service_create', conditions=dict(method=['POST']))
+        self.mapper.connect('/api/v0/service/list', controller=RestServer, action='handle_service_get', conditions=dict(method=['GET']))
+        self.mapper.connect('/api/v0/service/remove', controller=RestServer, action='handle_service_remove', conditions=dict(method=['DELETE']))
         self.wsgi.registory['RestServer'] = self.data
         self.data['graph'] = None
         self.data['app'] = self
@@ -316,11 +336,11 @@ class SliceController(app_manager.RyuApp):
             if isinstance(next_link.node0, net_graph.NetHost):
                 logger.error('[CONTROLLER] Unexpected sequence in path')
                 raise Exception("Invalid path")
-            logger.info(f'Add {begin} -> {end} to {link.node1.dpid}, in port: {link.port2}, out port: {next_link.port1}, first delay: {link.delay}, second delay: {next_link.delay}')
+            logger.info(f'[CONTROLLER] Add {begin} -> {end} to {link.node1.dpid}, in port: {link.port2}, out port: {next_link.port1}, first delay: {link.delay}, second delay: {next_link.delay}')
             dpid = int(link.node1.dpid, 16)
             dp: Datapath = self.dpaths.get(dpid)
             if dp is None:
-                logger.info(f'But datapath has not been registered?')
+                logger.info(f'[CONTROLLER] But datapath has not been registered?')
                 raise Exception("Invalid dpid")
             ofproto = dp.ofproto
             parser = dp.ofproto_parser
@@ -360,7 +380,7 @@ class SliceController(app_manager.RyuApp):
             dpid = int(switch.dpid, 16)
             dp: Datapath = self.dpaths.get(dpid)
             if dp is None:
-                logger.info(f'But datapath has not been registered?')
+                logger.info(f'[CONTROLLER] But datapath has not been registered?')
                 raise Exception("Invalid dpid")
             #ofproto = dp.ofproto
             #parser = dp.ofproto_parser
@@ -368,7 +388,7 @@ class SliceController(app_manager.RyuApp):
             #actions = []
             #instruction = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, \
             #                                        actions)]
-            logger.info(f"Remove {begin} -> {end} from {switch}")
+            logger.info(f"[CONTROLLER] Remove {begin} -> {end} from {switch}")
             for cookie in cookie_list:
                 self.remove_flow(dp, None, None, cookie=cookie)
         return
@@ -379,14 +399,19 @@ class SliceController(app_manager.RyuApp):
         if (begin.ip, end.ip) in self.created_paths or (end.ip, begin.ip) in self.created_paths:
             return True
         qos_config: list[typing.Dict[str, typing.Any]] = self.data['qos']
-        logger.info(f"{begin} -> {end}, max delay: {qos_config[qos]['max_delay']}, min bw: {qos_config[qos]['min_bw']}")
+        logger.info(f"[CONTROLLER] {begin} -> {end}, max delay: {qos_config[qos]['max_delay']}, min bw: {qos_config[qos]['min_bw']}")
         self.created_paths[(begin.ip, end.ip)] = self.data['graph'].find_path(begin, end, opt="hops", max_delay=qos_config[qos]["max_delay"], min_bw=qos_config[qos]['min_bw'])
         if self.created_paths[(begin.ip, end.ip)] == None:
-            logger.info(f'QoS requirements not met')
+            logger.info(f'[CONTROLLER] QoS requirements not met')
             if best_effort:
-                logger.info(f'Attempting best effort')
+                logger.info(f'[CONTROLLER] Attempting best effort')
                 self.created_paths[(begin.ip, end.ip)] = self.data['graph'].find_path(begin, end, opt="hops")
+                if self.created_paths[(begin.ip, end.ip)] != None:
+                    self.paths_without_qos[(begin.ip, end.ip)] = qos
+
         if self.created_paths[(begin.ip, end.ip)] != None:
+            if (begin.ip, end.ip) in self.unrouted_paths:
+                del self.unrouted_paths[(begin.ip, end.ip)]
             self.path_cookies[(begin.ip, end.ip)] = []
             self.create_route_flows(self.created_paths[(begin.ip, end.ip)], begin, end, qos, self.path_cookies[(begin.ip, end.ip)])
         else:
@@ -395,7 +420,7 @@ class SliceController(app_manager.RyuApp):
         self.path_qos[(begin.ip, end.ip)] = qos
         return True
     
-    def remove_route(self, begin: net_graph.NetHost, end: net_graph.NetHost):
+    def remove_route(self, begin: net_graph.NetHost, end: net_graph.NetHost, keep_endpoints: bool = False):
         if begin == end:
             return True
         if (begin.ip, end.ip) not in self.created_paths and (end.ip, begin.ip) not in self.created_paths:
@@ -406,11 +431,19 @@ class SliceController(app_manager.RyuApp):
             end = temp_host
         if (begin.ip, end.ip) not in self.path_cookies:
             raise Exception(f"path_cookies does not contain {begin} -> {end}")
-        logger.info(f"Delete path {begin} -> {end}")
+        logger.info(f"[CONTROLLER] Delete path {begin} -> {end}")
         self.remove_route_flows(begin, end, self.path_cookies[(begin.ip, end.ip)])
         del self.path_cookies[(begin.ip, end.ip)]
         del self.created_paths[(begin.ip, end.ip)]
+        prev_qos = self.path_qos[(begin.ip, end.ip)]
         del self.path_qos[(begin.ip, end.ip)]
+        graph: net_graph.NetGraph = self.data['graph']
+        if not graph.cache_invalidate_path(begin, end):
+            logger.info("[CONTROLLER] Path already invalidated in cache")
+        if (begin.ip, end.ip) in self.paths_without_qos:
+            del self.paths_without_qos[(begin.ip, end.ip)]
+        if keep_endpoints:
+            self.unrouted_paths[(begin.ip, end.ip)] = prev_qos
         return True
     
     @set_ev_cls(InitEvent, MAIN_DISPATCHER)
@@ -424,9 +457,7 @@ class SliceController(app_manager.RyuApp):
                     if not success:
                         success = self.create_route(net_graph.NetHost(host), net_graph.NetHost(other_host), self.data['default_qos'], True)
                     if not success:
-                        logger.info(f'{host} -> {other_host} not possible')      
-        #path_list = [(begin, end) for begin, end in self.created_paths.keys()]
-        #self.remove_route(net_graph.NetHost(path_list[0][0]), net_graph.NetHost(path_list[0][1]))
+                        logger.info(f'{host} -> {other_host} not possible')
         return
     
     @set_ev_cls(ShutdownEvent, MAIN_DISPATCHER)
@@ -439,23 +470,96 @@ class SliceController(app_manager.RyuApp):
         del self.data['qos']
         del self.data['slices']
         del self.data['graph']
+        self.unrouted_paths.clear()
+        self.paths_without_qos.clear()
+        self.created_paths.clear()
+        self.path_cookies.clear()
+        self.path_qos.clear()
+
+
+    def attempt_rerouting(self):
+        unrouted_paths_temp = copy.deepcopy(self.unrouted_paths)
+        logger.info(f"[CONTROLLER] Found {len(unrouted_paths_temp)} unrouted paths")
+        for (begin, end), qos in unrouted_paths_temp.items():
+            logger.info(f"[CONTROLLER] Attempting to route {begin} -> {end}")
+            success = self.create_route(net_graph.NetHost(begin), net_graph.NetHost(end), qos, False)
+            if not success:
+                success = self.create_route(net_graph.NetHost(begin), net_graph.NetHost(end), qos, True)
+            if not success:
+                logger.info(f'[CONTROLLER] {begin} -> {end} not possible, maybe one end-point is isolated?')
+
+        qos_config: list[typing.Dict[str, typing.Any]] = self.data['qos']
+        graph: net_graph.NetGraph = self.data['graph']
+        paths_without_qos_temp = copy.deepcopy(self.paths_without_qos)
+        logger.info(f"[CONTROLLER] Found {len(paths_without_qos_temp)} routed paths not respecting QoS")
+        for (begin, end), qos in paths_without_qos_temp.items():
+            #curr_path = copy.deepcopy(self.created_paths[(begin, end)])
+            logger.info(f"[CONTROLLER] Attempting to reroute {begin} -> {end}")
+            alternative_path = graph.find_path(net_graph.NetHost(begin), net_graph.NetHost(end), opt="hops", max_delay=qos_config[qos]["max_delay"], 
+                                               min_bw=qos_config[qos]['min_bw'], ignore_cache=True, keep_cache=True)
+            if alternative_path == None:
+                logger.info(f"[CONTROLLER] Reroute failed, continue")
+                continue
+            logger.info(f"[CONTROLLER] Reroute success, removing previous path")
+            self.remove_route(net_graph.NetHost(begin), net_graph.NetHost(end), True)
+            if not self.create_route(net_graph.NetHost(begin), net_graph.NetHost(end), qos, False):
+                logger.info(f"[CONTROLLER] But it failed? Fallback to best effort")
+                if not self.create_route(net_graph.NetHost(begin), net_graph.NetHost(end), qos, True):
+                    logger.info(f'[CONTROLLER] {begin} -> {end} not possible, maybe one end-point is isolated?')
+        return
 
     
     @set_ev_cls(ofp_event.EventOFPPortStatus, MAIN_DISPATCHER)
     def port_state_change_handler(self, ev: ofp_event.EventOFPMsgBase):
         msg = ev.msg
-        dp = msg.datapath
+        dp: Datapath = msg.datapath
         ofp = dp.ofproto
 
-        if msg.reason == ofp.OFPPR_ADD:
-            reason = 'ADD'
-        elif msg.reason == ofp.OFPPR_DELETE:
-            reason = 'DELETE'
-        elif msg.reason == ofp.OFPPR_MODIFY:
-            reason = 'MODIFY'
-        else:
-            reason = 'unknown'
+        if msg.reason != ofp.OFPPR_MODIFY:
+            return 
+        
+        port = msg.desc
+        port_no: int = port.port_no
+        is_port_down: bool = (port.state & ofproto_v1_3.OFPPS_LINK_DOWN) != 0
 
-        logger.info('OFPPortStatus received: reason=%s desc=%s',
-                          reason, msg.desc)
+        dpid_str = f"{dp.id:016x}"
+        logger.info(f"[CONTROLLER] Switch({dpid_str}) port {port_no} status changed, is now {'down' if is_port_down else 'up'}")
+
+        if 'graph' not in self.data or self.data['graph'] == None:
+            return
+        
+        graph: net_graph.NetGraph = self.data['graph']
+
+        switch_node = net_graph.NetSwitch(dpid_str)
+        all_links = graph.get_links_with_node(switch_node)
+
+        if len(all_links) == 0:
+            return
+        
+        #logger.info(list(map(lambda link: link.get_node_port(switch_node)[0], all_links)))
+        links_with_port = list(filter(lambda link: link.get_node_port(switch_node)[0] == str(port_no), all_links))
+
+        if len(links_with_port) != 1:
+            logger.error(f"{list(map(lambda link: str(link), links_with_port))}")
+            return
+
+        modified_link = links_with_port[0]
+        port_id = modified_link.get_node_port(switch_node)[1]
+
+        if port_id != 0 and port_id != 1:
+            logger.error("[CONTROLLER] Nani?")
+            return
+
+        if port_id == 0:
+            mod_paths = graph.modify_link(modified_link, port1_down=is_port_down)
+        else:
+            mod_paths = graph.modify_link(modified_link, port2_down=is_port_down)
+
+        if len(mod_paths) != 0:
+            logger.info(f"[CONTROLLER] Link status change caused {len(mod_paths)} to be invalidated")
+            for begin, end, path in mod_paths:
+                logger.info(f"[CONTROLLER] {begin} -> {end} invalidated")
+                self.remove_route(begin, end, True) 
+
+        self.attempt_rerouting()
         return

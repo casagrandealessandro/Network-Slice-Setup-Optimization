@@ -9,9 +9,32 @@ import requests
 import subprocess
 
 def load_queues(qos_file: str, switches: List[Tuple[str, OVSSwitch]], controller_ip: str, controller_port: str, default_bw: float = 10, default_delay=5):
+    """
+    Attempt to load queues from file and then:
+    - Configure switches
+    - Send to controller
+
+    # Parameters
+    - str   qos_file: path to QoS file 
+    - list  switches: list of switches to configure
+    - str   controller_ip: ip of controller
+    - int   controller_port: port of HTTP REST server
+    - float default_bw: default bandwidth of a link if not specified (in Mb/s)
+    - float default_delay: same as bw but for delay (in ms)
+
+    # Returns
+    True if success, else False
+    """
     with open(qos_file) as qos_fd:
         print(f'Load queue: file {qos_file} opened')
         try:
+            """
+            QoS file has JSON format containing a list of QoS
+            Each QoS has the following format:
+            {"min_bw": "bw in Mb/s", "max_bw": "bw in Mb/s", "min_delay": "delay in ms", "max_delay": "delay in ms"}
+
+            TODO: Maybe add readable names to QoS?
+            """
             qos_temp: list[Dict[str, str]] = json.load(qos_fd)
         except:
             print('Load queue: json load failed')
@@ -19,8 +42,10 @@ def load_queues(qos_file: str, switches: List[Tuple[str, OVSSwitch]], controller
     try:
         qos: list[Dict[str, float]] = []
 
+        # Suffixes for bandwidth
         bw_strings = ['kb', 'mb', 'gb']
         bw_mult = [1e3, 1e6, 1e9]
+        # Suffixes for delay
         delay_strings = ['ms']
         delay_mult = [1]
 
@@ -40,19 +65,26 @@ def load_queues(qos_file: str, switches: List[Tuple[str, OVSSwitch]], controller
         
         queue_create_cmd = []
 
-        for index, queue in enumerate(qos_temp):
+        for index, queue in enumerate(qos_temp): # Parse all QoS entries in the file
+            # Extract parameters, else replace with default
             queue_min_bw = try_parsing("min_bw", queue, bw_mult, bw_strings, default_bw)
             queue_max_bw = try_parsing("max_bw", queue, bw_mult, bw_strings, default_bw)
             
             queue_min_delay = try_parsing("min_delay", queue, delay_mult, delay_strings, default_delay)
             queue_max_delay = try_parsing("max_delay", queue, delay_mult, delay_strings, default_delay)
             
+            # Appenf for controller
             qos.append({"min_bw": queue_min_bw, "max_bw": queue_max_bw, "min_delay": queue_min_delay, "max_delay": queue_max_delay})
+            # Append command to create the current queue
             queue_create_cmd.extend(['--', f'--id=@q{index}', 'create', 'queue', f'other-config:min-rate={int(queue_min_bw*1e6)}', f'other-config:max-rate={int(queue_max_bw*1e6)}'])
 
+        # Now that we have all the subcommands for the queues, we can prepend the main command for QoS
         vsctl_cmd = ['--id=@newqos', 'create', 'qos', 'type=linux-htb',  f'other-config:max-rate={int(default_bw)}']
         queues = ['queues=']
         
+        # From the commands for queue creation, each new queue is identified
+        # as @q[queue_id]. Here we create the list to reference those queues
+        # during QoS creatiom (the format is "queues=@q0,@q1,...")
         for queue_num in range(len(qos)):
             queues.append(f'{queue_num}=@q{queue_num}')
             if queue_num < len(qos) - 1:
@@ -67,6 +99,10 @@ def load_queues(qos_file: str, switches: List[Tuple[str, OVSSwitch]], controller
         if create_qos.wait() != 0:
             logging.error(create_qos.stderr.read().decode())
             return False
+        
+        # Executing the command will return a total of N + 1
+        # lines, where N is the number of queues. Each line
+        # represent a UUID for the QoS or a queue
         result = create_qos.stdout.read().decode().split()
         if len(result) != len(qos) + 1:
             logging.error('Load queues: vsctl returned too few lines')
@@ -79,20 +115,19 @@ def load_queues(qos_file: str, switches: List[Tuple[str, OVSSwitch]], controller
             interfaces: list[Intf] = switch.intfList()
             print(f'Load queue: switch has {len(interfaces)} interfaces')
             for intf in interfaces:
-                if intf.name == 'lo':
+                if intf.name == 'lo': # Skip loopback interface
                     continue
+                # "custom_bw" is not a real parameter for a link, but its inclusion
+                # is necessary, because if we used "bw" to set a real custom
+                # bandwidth, it would not allow us to apply queues
+                # on said link (https://github.com/mininet/mininet/issues/243)
                 bw = try_parsing("custom_bw", intf.params, bw_mult, bw_strings, default_bw)
                 delay = try_parsing("delay", intf.params, delay_mult, delay_strings, default_delay)
                 print(f'bw: {bw}, delay: {delay}')
-                
-                """
-                --   --id=@q0   create   Queue   other-config:min-rate=100000000
-                other-config:max-rate=100000000 \
-        
-                -- --id=@q1 create Queue other-config:min-rate=500000000
-                """
                         
                 for index, queue in enumerate(qos):
+                    # This loop makes sure that all links (in isolation)
+                    # can respect all QoS requirements
                     queue_min_bw = queue["min_bw"]
                     queue_max_bw = queue["max_bw"]
         
@@ -107,6 +142,7 @@ def load_queues(qos_file: str, switches: List[Tuple[str, OVSSwitch]], controller
                         print(f'Load queue: qos {index} expects delay smaller than the link')
                         return False
                 
+                # Finally assign QoS to the interface of the switch
                 vsctl_cmd = ['ovs-vsctl', 'set', 'port', f'{intf.name}', f'qos={result[0]}']
                 print(' '.join(vsctl_cmd))
 
@@ -119,12 +155,28 @@ def load_queues(qos_file: str, switches: List[Tuple[str, OVSSwitch]], controller
         return False
     print(qos)
 
+    # Send QoS to controller
     requests.post(f'http://{controller_ip}:{controller_port}/api/v0/qos', 
                   headers={'ContentType': 'application/json'},
                   json=qos)
     return True
 
 def clear_queues():
+    """
+    Removes all queues and QoS from all switches. 
+    
+    ## Is it necessary?
+    Yes: Mininet will not remove QoS and queues created
+    by its instance, which means that they will persist
+    after the application exits. This function makes
+    sure that they do not
+
+    # Returns
+    True if success, else False
+    """
+    # First destroy QoS; we cannot delete queues first because
+    # they would still be referenced by the QoS, and ovs-vsctl
+    # does not allow that
     clear_qos = subprocess.Popen(['ovs-vsctl', '--all', 'destroy', 'qos'])
     if clear_qos.wait() != 0:
         return False

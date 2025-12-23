@@ -9,7 +9,7 @@ docker pull technitium/dns-server
 Build image:
 ```
 cd dns_docker
-docker build -t dns-server-mn .
+docker build -t dns-mn .
 cd ..
 ```
 

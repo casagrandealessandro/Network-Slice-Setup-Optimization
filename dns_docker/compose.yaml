@@ -1,8 +1,8 @@
 services:
   dns-server-build:
-    container_name: dns-server
+    container_name: dns_server
     hostname: dns-server
-    image: dns-server-mn
+    image: dns-mn
     # For DHCP deployments, use "host" network mode and remove all the port mappings, including the ports array by commenting them
     # network_mode: "host"
     ports:

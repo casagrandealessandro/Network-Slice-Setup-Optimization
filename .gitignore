@@ -1,2 +1,3 @@
 dns_docker/containernet/*
 logs/*
+config/dns_config/logs/*

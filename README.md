@@ -13,6 +13,11 @@ docker build -t dns-mn .
 cd ..
 ```
 
+Check the presence of dev_test image (from comnetsemu)
+```
+docker images | grep dev_test
+```
+
 # Run
 Make sure that port 53 is free for binding:
 ```
@@ -32,15 +37,32 @@ sudo python3 topology.py
 ```
 
 # Check mininet-host connectivity and services
-net tools:
+let this be the output of the service start phase:
 ```
-h13 ifconfig
+Web Server: h13 (10.0.0.13)                      
+Web Client: h4 (10.0.0.4)                       
+Stream Server: h18 (10.0.0.18)                   
+Stream Client: h11 (10.0.0.11)                   
+                                                                                                                      
+Starting web server on h13...
+Starting stream server on h18...
+Creating video file...
+
+Starting client services...
+
+*** Services started ***
 ```
 
-services:
+Check services connectivity
+Web service:
 ```
-h17 curl -I http://10.0.0.13:80
-h8 wget http://10.0.0.3:4380/video.dat
+mininet> h13 netstat -tlnp | grep 80
+mininet> h4 curl -I http://10.0.0.13:80
+```
+Streaming service (the download takes a while):
+```
+mininet> h18 netstat -tlnp | grep 80
+mininet> h11 curl -o /dev/null http://10.0.0.18:80/video.dat
 ```
 
 # Every time you restart make sure to clean all the previous stroz

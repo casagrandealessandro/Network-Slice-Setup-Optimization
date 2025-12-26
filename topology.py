@@ -107,8 +107,8 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
             #host = net.addHost(f"h{len(net.hosts) + 1}")
             host = net.addDockerHost(
                 f"h{len(net.hosts) + 1}",
-                dimage="ubuntu:22.04",
-                docker_args={}
+                dimage="dev_test",
+                docker_args={"hostname": f"h{len(net.hosts) + 1}"}
             )
             net.addLink(host, leaf, custom_bw="50")
 
@@ -316,17 +316,10 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     container = docker_client.containers.get("stream_server")
     container.exec_run('sh -c "dd if=/dev/zero of=/usr/share/nginx/html/video.dat bs=1M count=100"')
     
-    # Install tools on clients (blocking calls)
-    print(f"\nInstalling curl on {web_client_host.name}...")
-    web_client_host.cmd('apt-get update && apt-get install -y curl')
-    
-    print(f"Installing wget on {stream_client_host.name}...")
-    stream_client_host.cmd('apt-get update && apt-get install -y wget')
-    
     # Start client services
     print("\nStarting client services...")
     web_client_host.cmd(f'while true; do curl -s http://{web_server_ip}:80 > /dev/null 2>&1; sleep 1; done &')
-    stream_client_host.cmd(f'while true; do wget -q -O /dev/null http://{stream_server_ip}:80/video.dat 2>&1; sleep 0.1; done &')
+    stream_client_host.cmd(f'while true; do curl -s -o /dev/null http://{stream_server_ip}:80/video.dat 2>&1; sleep 2; done &')
     
     print("\n*** Services started ***\n")
 
@@ -372,7 +365,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
         web_client_host.cmd('pkill -f "curl"')
     
     if stream_client_host:
-        stream_client_host.cmd('pkill -f "wget"')
+        stream_client_host.cmd('pkill -f "curl"')
     
     # Stop and remove server containers using VNFManager
     try:

@@ -24,6 +24,7 @@ import copy
 import net_graph
 
 from stats_monitor import StatsMonitor
+from service import Service, ServiceList
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -274,29 +275,54 @@ class RestServer(wsgi.ControllerBase):
     @route_handler(http_method="POST")
     def handle_service_create(self, req: Request, **_kwargs):
         """
-        Creates a new service and returns the associated ID
+        Creates a new service and returns the associated ID and
+        IP address
 
-        Body format:
-        
-        \{
-        "name": name of the service
-        \}
+        domain: str, subscriber: str, qos_index: int, service_type: str
         """
-        #put service in list, attempt routing
-        return {'status': 'E_OK'}, 200
+        body: typing.Dict = json.loads(req.body.decode())
+        required = ["domain", "subscriber", "qos", "type"]
+        has_required = all(required_param in body for required_param in required)
+        if not has_required:
+            return {'status': 'E_MISSING_PARAMS'}, 400
+        wanted_types = [str, str, int, str]
+        is_ok = all(type(body[param]) == required_type for param, required_type in zip(required, wanted_types))
+        if not is_ok:
+            return {'status': 'E_INV_PARAMS'}, 400
+        the_service = Service(body['domain'], body['subscriber'], body['qos'], body['type'])
+        app: SliceController = self.data['app']
+        result = app.add_service(the_service)
+        if result == None:
+            return {'status': 'E_FAIL'}, 403
+        return {'status': 'E_OK', 'service_id': result.id, 'service_ip': result.curr_ip}, 200
     
     @route_handler(http_method="GET")
     def handle_service_get(self, req: Request, **_kwargs):
         #get list of services
-        return {'status': 'E_OK'}, 200
+        app: SliceController = self.data['app']
+        with app.service_lock:
+            services = copy.deepcopy(app.services)
+        return {'status': 'E_OK', "services": services}, 200
     
     @route_handler(http_method="DELETE")
     def handle_service_remove(self, req: Request, **_kwargs):
         #remove a service
         if not "id" in _kwargs:
             return {'status': 'E_MISSING_ID'}, 400
+        app: SliceController = self.data['app']
+        with app.service_lock:
+            services = copy.deepcopy(app.services)
+        if services.get_service_by_id(_kwargs["id"]) == None:
+            return {'status': 'E_INV_SERVICE'}, 403
+        app: SliceController = self.data['app']
+        result = app.remove_service(int(_kwargs['id']))
+        if not result:
+            return {'status': 'E_FAIL'}, 403
         return {'status': 'E_OK'}, 200
     
+    #------------------------------------------------
+    #UNUSED
+
     @route_handler(http_method="POST")
     def handle_service_add_client(self, req: Request, **_kwargs):
         return {'status': 'E_OK'}, 200
@@ -323,6 +349,7 @@ class SliceController(app_manager.RyuApp):
     def __init__(self, *_args, **_kwargs):
         self.queue_uuids: dict[int, str] = {}
         self.qos_lock = Lock()
+        self.service_lock = Lock()
 
         super(SliceController, self).__init__(*_args, **_kwargs)
         # Data that needs to be shared with the REST server
@@ -342,6 +369,8 @@ class SliceController(app_manager.RyuApp):
         self.paths_without_qos: typing.Dict[typing.Tuple[str, str], int] = {}
         # All port stats changes not already applied to th graph
         self.port_stat_changes: typing.Dict[str, typing.List[int]] = {}
+
+        self.services: ServiceList = ServiceList()
         # Incrementing value used to set cookies for flows
         # Start from one since cookies with value zero
         # are used for default flows
@@ -355,8 +384,9 @@ class SliceController(app_manager.RyuApp):
         self.mapper.connect('/api/v0/service/create', controller=RestServer, action='handle_service_create', conditions=dict(method=['POST']))
         self.mapper.connect('/api/v0/service/list', controller=RestServer, action='handle_service_get', conditions=dict(method=['GET']))
         self.mapper.connect('/api/v0/service/:id/remove', controller=RestServer, action='handle_service_remove', conditions=dict(method=['DELETE']))
-        self.mapper.connect('/api/v0/service/:id/clientadd/:clientip', controller=RestServer, action='handle_service_add_client', conditions=dict(method=['POST']))
-        self.mapper.connect('/api/v0/service/:id/clientremove/:clientip', controller=RestServer, action='handle_service_remove_client', conditions=dict(method=['DELETE']))
+        
+        #self.mapper.connect('/api/v0/service/:id/clientadd/:clientip', controller=RestServer, action='handle_service_add_client', conditions=dict(method=['POST']))
+        #self.mapper.connect('/api/v0/service/:id/clientremove/:clientip', controller=RestServer, action='handle_service_remove_client', conditions=dict(method=['DELETE']))
         
         self.mapper.connect('/api/v0/qos/queues',controller=RestServer,action='handle_qos_queues',conditions=dict(method=['POST']))
         self.mapper.connect('/api/v0/qos/update',controller=RestServer,action='handle_qos_update',conditions=dict(method=['POST']))
@@ -895,3 +925,14 @@ class SliceController(app_manager.RyuApp):
     def handle_route_reevaluate(self, ev: ofp_event.EventOFPMsgBase):
         logger.info("[CONTROLLER] Route re-evaluation")
         self.attempt_rerouting()
+
+    
+    def add_service(self, service: Service) -> typing.Optional[Service]:
+    #1. try to place it in the network
+    #2. Set DNS entry
+    #3. Save to file
+    #Use lock to manage routes?
+        return None        
+    
+    def remove_service(self, id: int) -> bool:
+        return False

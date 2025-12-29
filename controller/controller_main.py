@@ -429,22 +429,36 @@ class SliceController(app_manager.RyuApp):
     def assign_new_ip(self, service: Service) -> str:
         """
         Assign a new IP to a service, avoiding conflicts with already assigned IPs.
+        Chooses IPs only from the same slice as the subscriber.
         """
-        base_ip = "10.0.0."  # puoi parametrizzare dalla tua configurazione
+        # Find the slice of the subscriber
+        slice_name = None
+        for name, ips in self.data['slices'].items():
+            if service.subscriber in ips:
+                slice_name = name
+                break
+
+        if slice_name is None:
+            raise Exception(f"Subscriber {service.subscriber} non trovato in nessuno slice")
+
+        # List of already used IPs
         used_ips = {s.curr_ip for s in self.services.services.values() if s.curr_ip}
-        for i in range(2, 254):
-            candidate = f"{base_ip}{i}"
+
+        # Find a free IP in the slice
+        for candidate in self.data['slices'][slice_name]:
             if candidate not in used_ips:
                 service.curr_ip = candidate
-                logger.info(f"[SERVICE] Assigned new IP {candidate} to {service.domain}")
+                logger.info(f"[SERVICE] Assigned new IP {candidate} to {service.domain} in slice {slice_name}")
                 return candidate
-        raise Exception("No free IPs available for service migration")
+
+        raise Exception(f"Nessun IP disponibile nel slice {slice_name} per {service.domain}")
+
 
     def migrate_service(self, service: Service):
         """
         Perform migration of a service:
-        - Assign a new IP
-        - Update DNS record
+        - Assign a new IP (from the same slice as the subscriber)
+        - Update DNS record with correct zone
         - Reset slice info
         """
         old_ip = service.curr_ip
@@ -456,9 +470,10 @@ class SliceController(app_manager.RyuApp):
 
         if self.dns_conn:
             try:
+                zone = ".".join(service.domain.split(".")[1:])
                 self.dns_conn.update_record(
                     domain=service.domain,
-                    zone=service.domain,
+                    zone=zone,
                     oldip=old_ip,
                     newip=new_ip
                 )
@@ -470,7 +485,6 @@ class SliceController(app_manager.RyuApp):
             stored = self.services.get_service_by_id(service.id)
             if stored:
                 stored.curr_ip = new_ip
-                stored.slice = None  # resetta la slice se necessario
                 stored.qos_violations = 0
                 self.services.dump(self.data['conf']['service_list_file'])
                 logger.info(f"[SERVICE] {service.domain} migration completed: new IP {new_ip}")

@@ -76,6 +76,14 @@ def add_service(domain: str, subscriber: str, qos: int, type: str, controller_ip
     if response.status_code != 200:
         return None, response.json()
     return response.json(), None
+
+def remove_service(service_id: int, controller_ip: str, controller_port: int) -> tuple[Optional[Any], Optional[Any]]:
+    import requests
+    response = requests.delete(f"http://{controller_ip}:{controller_port}/api/v0/service/{service_id}/remove", 
+                               headers={'ContentType': 'application/json'})
+    if response.status_code != 200:
+        return None, response.json()
+    return response.json(), None
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog='Services',

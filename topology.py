@@ -6,6 +6,7 @@ import time
 import json
 from subprocess import Popen
 import os
+import pickle
 
 from comnetsemu.net import Containernet, VNFManager
 from comnetsemu.node import DockerHost
@@ -21,6 +22,7 @@ import requests
 import queues
 from subprocess import Popen, PIPE
 from controller.dns_api import DNSServer
+import docker
 
 from pathlib import Path
 
@@ -313,7 +315,6 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     
     # Simulate streaming with a large file (100 MB)
     print("Creating video file...")
-    import docker
     docker_client = docker.from_env()
     container = docker_client.containers.get("stream_server")
     container.exec_run('sh -c "dd if=/dev/zero of=/usr/share/nginx/html/video.dat bs=1M count=100"')
@@ -332,8 +333,11 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
         }
     )
     
+    web_service_id = None
     if web_service_response.status_code == 200:
-        print(f"Web service registered: {web_service_response.json()}")
+        response_data = web_service_response.json()
+        print(f"Web service registered: {response_data}")
+        web_service_id = response_data.get('service_id')
     else:
         print(f"Failed to register web service: {web_service_response.json()}")
     
@@ -348,8 +352,11 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
         }
     )
     
+    stream_service_id = None
     if stream_service_response.status_code == 200:
-        print(f"Stream service registered: {stream_service_response.json()}")
+        response_data = stream_service_response.json()
+        print(f"Stream service registered: {response_data}")
+        stream_service_id = response_data.get('service_id')
     else:
         print(f"Failed to register stream service: {stream_service_response.json()}")
     
@@ -359,6 +366,110 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     stream_client_host.cmd(f'while true; do curl -s -o /dev/null http://{stream_server_ip}:80/video.dat 2>&1; sleep 2; done &')
     
     print("\n*** Services started ***\n")
+
+    # ----- SERVICE MIGRATION LOOP -----
+    service_locations = {}
+    if web_service_id is not None:
+        service_locations[web_service_id] = {
+            'container_name': 'web_server',
+            'current_ip': web_server_ip,
+            'current_host': web_server_host
+        }
+    if stream_service_id is not None:
+        service_locations[stream_service_id] = {
+            'container_name': 'stream_server',
+            'current_ip': stream_server_ip,
+            'current_host': stream_server_host
+        }
+
+    # Monitor services.obj and migrate containers when controller updates service IPs
+    def migration_loop():
+        SERVICES_FILE = "./config/services.obj"
+        CHECK_INTERVAL = 5
+        
+        while True:
+            time.sleep(CHECK_INTERVAL)
+            
+            if not os.path.exists(SERVICES_FILE):
+                continue
+            
+            try:
+                # Import service classes
+                import sys
+                controller_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'controller')
+                if controller_path not in sys.path:
+                    sys.path.insert(0, controller_path)
+                from service import Service
+                
+                with open(SERVICES_FILE, 'rb') as f:
+                    service_list = pickle.load(f)
+                
+                # Check each service
+                for service in service_list:
+                    if service.id not in service_locations:
+                        continue
+                    
+                    current_location = service_locations[service.id]
+                    new_ip = service.curr_ip
+                    
+                    # Check if migration is needed
+                    if new_ip and new_ip != current_location['current_ip']:
+                        print(f"\n*** MGRATION REQUEST DETECTED for service {service.id} ({service.domain}) ***")
+                        print(f"Current IP: {current_location['current_ip']} -> New IP: {new_ip}")
+                        
+                        # Find the new host for this IP
+                        new_host = None
+                        for host in net.hosts:
+                            if host.IP() == new_ip:
+                                new_host = host
+                                break
+                        
+                        if not new_host:
+                            print(f"ERROR: Could not find host with IP {new_ip}")
+                            continue
+                        
+                        container_name = current_location['container_name']
+                        
+                        try:
+                            # Remove container from old location
+                            print(f"Removing container {container_name} from {current_location['current_host'].name}")
+                            mgr.removeContainer(container_name)
+                            
+                            time.sleep(1)
+                            
+                            # Add container to new location
+                            print(f"Adding container {container_name} to {new_host.name} ({new_ip})")
+                            mgr.addContainer(
+                                container_name,
+                                new_host.name,
+                                "nginx:alpine",
+                                "nginx -g 'daemon off;'"
+                            )
+                            
+                            # If it's the stream server, recreate the video file
+                            if container_name == "stream_server":
+                                time.sleep(2)
+                                print("Recreating video file on new location...")
+                                docker_client = docker.from_env()
+                                container = docker_client.containers.get(container_name)
+                                container.exec_run('sh -c "dd if=/dev/zero of=/usr/share/nginx/html/video.dat bs=1M count=100"')
+                            
+                            # Update dictionary
+                            service_locations[service.id]['current_ip'] = new_ip
+                            service_locations[service.id]['current_host'] = new_host
+                            
+                            print(f"*** MIGRATION COMPLETED for service {service.id} ***\n")
+                            
+                        except Exception as e:
+                            print(f"ERROR during migration: {e}")
+                            
+            except Exception as e:
+                print(f"Error reading services file: {e}")
+    
+    # Start migration monitoring thread
+    migration_thread = threading.Thread(target=migration_loop, daemon=True)
+    migration_thread.start()
+    print("Migration monitoring started (checking every 5 seconds)\n")
 
     # ----- ENVIRONMENTAL EVENTS -----
     def environmental_events():

@@ -82,6 +82,8 @@ class NetLink:
         self.port2 = port2
         self.port1_down = False 
         self.port2_down = False
+
+        self.last_update_bw = self.max_bw
     
     def __str__(self):
         return f'Link({self.node0} -> {self.node1})'
@@ -145,7 +147,8 @@ class NetLink:
         bandwidth, set bw to that value
         """
         if used_bw > self.max_bw:
-            raise Exception("Occupied bw greater than max bw?")
+            print(f"[GRAPH] Clamp used BW from {used_bw} to {self.max_bw}")
+            used_bw = self.max_bw
         self.bw = self.max_bw - used_bw
 
     def add_to_bw(self, freed_bw: float):
@@ -326,15 +329,22 @@ class NetGraph:
             inv_paths = self.cache_invalidate_link(link)
         return inv_paths
     
-    def modify_curr_link_bw(self, link: NetLink, used_bw: float):
+    def modify_curr_link_bw(self, link: NetLink, used_bw: float, keep_cache=False):
         if not link in self.links:
             return []
         index = self.links.index(link)
         old_bw = self.links[index].bw
         self.links[index].subtract_from_max_bw(used_bw)
-        if self.links[index].bw != old_bw:
+        if self.links[index].bw != old_bw and not keep_cache:
             return self.cache_invalidate_link(link)
         return []
+    
+    def set_last_update_bw(self, link: NetLink, update_bw: float):
+        if not link in self.links:
+            return False 
+        index = self.links.index(link)
+        self.links[index].last_update_bw = update_bw
+        return True
     
     def add_link(self, link: NetLink):
         """
@@ -381,7 +391,7 @@ class NetGraph:
     def contains_link(self, link: NetLink):
         return link in self.links
 
-    def find_paths(self, host1: NetHost, host2: NetHost, min_bw: float, max_delay: float, old_path: List[NetLink]):
+    def find_paths(self, host1: NetHost, host2: NetHost, min_bw: float, max_delay: float, old_path: List[NetLink], max_used_bw_percent: float):
         """
         Find all possible paths between two endpoints, filtering by 
         the provided constraints
@@ -421,6 +431,11 @@ class NetGraph:
 
         if start.bw + possible_free_bw < min_bw or start.delay > max_delay or start.is_down(): # Check if the first link respects constraints
             return None
+        
+        used_percent = ((start.max_bw - start.bw) - possible_free_bw) / start.max_bw
+        if used_percent > max_used_bw_percent:
+            #print(f"[GRAPH] Used bw: {start.max_bw - start.bw} Mb/s; considered free: {possible_free_bw} Mb/s (first node)")
+            return None
 
         init_path = [start]
         def find_path_sub(self: NetGraph, visited_nodes: List[NetNode], curr_path: List[NetLink], curr_min_bw: float, curr_delay: float):
@@ -456,6 +471,11 @@ class NetGraph:
                 if link in old_path:
                     possible_free_bw = used_bw
 
+                used_percent = ((link.max_bw - link.bw) - possible_free_bw) / link.max_bw
+                if used_percent > max_used_bw_percent:
+                    #print(f"[GRAPH] Used bw: {link.max_bw - link.bw} Mb/s; considered free: {possible_free_bw} Mb/s")
+                    continue
+
                 if next_min_bw + possible_free_bw >= min_bw and next_delay <= max_delay and not link.is_down():
                     find_path_sub(self, copy.deepcopy(visited_nodes), new_path, next_min_bw, next_delay)
         find_path_sub(self, [host1], init_path, start.bw, start.delay)
@@ -479,6 +499,8 @@ class NetGraph:
         - max_delay
         - ignore_cache: If a path already exists in the cache, ignore it and recompute
         - keep_cache: Do not overwrite path in cache if it exists
+        - old_path: If a path already exists between the two hosts, consider its used bw as free
+        - used_bw_percent: Exclude paths with a used bw higher in percentage wrt this value (n.b. not truly a percentage, from 0.0 to 1.0)
 
         # Returns
         The path
@@ -489,6 +511,8 @@ class NetGraph:
         max_delay = float('inf') if "max_delay" not in kwargs else kwargs["max_delay"]
         keep_cache = False if "keep_cache" not in kwargs else kwargs["keep_cache"]
         old_path: List[NetLink] = [] if "old_path" not in kwargs else kwargs["old_path"]
+        max_used_bw_percent: float = float('inf') if "used_bw_bercent" not in kwargs else kwargs['used_bw_bercent']
+
         if not ignore_cache:
             path: list[NetLink] = self.cache_get(host1, host2, opt)
             if path != None:
@@ -503,7 +527,7 @@ class NetGraph:
         opt_options = ["none", "bw", "delay", "hops"]
         if not opt in opt_options:
             raise Exception("Invalid optimization")
-        paths = self.find_paths(host1, host2, min_bw, max_delay, old_path)
+        paths = self.find_paths(host1, host2, min_bw, max_delay, old_path, max_used_bw_percent)
         if paths == None:
             return None
         the_path = None

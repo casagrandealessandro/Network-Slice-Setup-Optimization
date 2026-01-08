@@ -287,7 +287,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
         json={
             "domain": "web.service.mn",
             "subscriber": web_client_ip,
-            "qos": 0,
+            "qos": 1,
             "service_type": "browsing"
         }
     )
@@ -349,7 +349,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     web_server_container = mgr.addContainer(
         "web_server",
         web_server_host.name,
-        "nginx:alpine",
+        "custom_nginx",
         "nginx -g 'daemon off;'"
     )
     
@@ -357,7 +357,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     stream_server_container = mgr.addContainer(
         "stream_server",
         stream_server_host.name,
-        "nginx:alpine",
+        "custom_nginx",
         "nginx -g 'daemon off;'"
     )
     

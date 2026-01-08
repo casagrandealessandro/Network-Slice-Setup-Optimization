@@ -5,9 +5,14 @@ from ryu.controller.controller import Datapath
 from ryu.controller import ofp_event
 from ryu.controller.handler import set_ev_cls, MAIN_DISPATCHER
 from ryu.lib import hub
+from ryu.base import app_manager
 
 from threading import Lock
 import copy
+
+class RouteReevaluateEvent(ofp_event.event.EventBase):
+    def __init__(self):
+        super().__init__()
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -44,13 +49,14 @@ class LinkStats:
 class StatsMonitor:
     """Statistics monitor for network links"""
     
-    def __init__(self, poll_interval: int = 10):
+    def __init__(self, controller: app_manager.RyuApp, poll_interval: int = 10):
         # Key: (dpid, port_no), Value: LinkStats
         self.link_stats: Dict[Tuple[str, int], LinkStats] = {}
         self.datapaths: List[Datapath] = []
         self.poll_interval = poll_interval
         self.dp_lock = Lock()
         self.monitor_thread = hub.spawn(self._monitor_loop)
+        self.controller = controller
 
     def register_datapath(self, datapath: Datapath):
         """Register a datapath for monitoring"""
@@ -65,6 +71,7 @@ class StatsMonitor:
     def _monitor_loop(self):
         """Periodically request statistics from all datapaths"""
         while True:
+            self.controller.send_event('SliceController', RouteReevaluateEvent())
             with self.dp_lock:
                 for dp in self.datapaths:
                     self._request_stats(dp)

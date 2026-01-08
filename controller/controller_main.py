@@ -23,7 +23,7 @@ import copy
 
 import net_graph
 
-from stats_monitor import StatsMonitor
+from stats_monitor import StatsMonitor, RouteReevaluateEvent
 from service import Service, ServiceList
 import dns_api
 
@@ -69,10 +69,6 @@ class InitEvent(ofp_event.event.EventBase):
         super().__init__()
 
 class ShutdownEvent(ofp_event.event.EventBase):
-    def __init__(self):
-        super().__init__()
-
-class RouteReevaluateEvent(ofp_event.event.EventBase):
     def __init__(self):
         super().__init__()
 
@@ -240,6 +236,7 @@ class RestServer(wsgi.ControllerBase):
                 logger.error(f'[REST] QoS {index} is missing has some invalid fields')
                 return {'status': 'E_INV_TYPES', 'qos': index}
         self.data['qos'] = body
+        self.data['orig_qos'] = copy.deepcopy(body)
         logger.info(f'[REST] Received queues: {body}')
         return {'status': 'E_OK'}, 200
     
@@ -340,6 +337,8 @@ BW_UPDATE_THRESHOLD_RATIO = 0.1
 
 COMMON_CONFIG_FILE = "./config/common.json"
 
+MAX_LINK_USED_BW_PERCENT = 0.1
+
 class SliceController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
@@ -357,6 +356,9 @@ class SliceController(app_manager.RyuApp):
 
     def evaluate_services_qos(self):
         if not hasattr(self, "paths_without_qos"):
+            return
+        
+        if 'graph' not in self.data:
             return
 
         with self.service_lock:
@@ -422,14 +424,18 @@ class SliceController(app_manager.RyuApp):
 
         if stored.qos_violations >= 3:
             logger.warning(f"[SERVICE] {service.domain} will be migrated")
+            #self.reset_service_violations(service)
             self.migrate_service(stored)
-
-
 
 
     def try_improve_queue(self, qos_index: int):
         qos = self.data['qos'][qos_index]
         new_max = qos['max_bw'] * 1.2
+
+        graph: net_graph.NetGraph = self.data['graph']
+        if any(link.max_bw < new_max for link in graph.links):
+            logger.warning("[QoS] QoS limited at max link speed")
+            return
 
         try:
             self.update_queue(qos_index, qos['min_bw'], new_max)
@@ -437,6 +443,7 @@ class SliceController(app_manager.RyuApp):
             logger.error("[QoS] Queue update failed")
 
     def reset_service_violations(self, service: Service):
+        logger.info(f"[SERVICE] Reset violations for {service.domain}")
         with self.service_lock:
             stored = self.services.get_service_by_id(service.id)
             if stored and stored.qos_violations != 0:
@@ -475,6 +482,10 @@ class SliceController(app_manager.RyuApp):
                 return candidate
 
         raise Exception(f"Nessun IP disponibile nel slice {slice_name} per {service.domain}")
+    
+    def reset_queue(self, qos_index: int):
+        orig = self.data['orig_qos'][qos_index]
+        self.update_queue(qos_index, orig['min_bw'], orig['max_bw'])
 
 
     def migrate_service(self, service: Service):
@@ -512,6 +523,8 @@ class SliceController(app_manager.RyuApp):
                 stored.qos_violations = 0
                 self.services.dump(self.data['conf']['service_list_file'])
                 logger.info(f"[SERVICE] {service.domain} migration completed: new IP {new_ip}")
+
+        self.reset_queue(service.qos_index)
 
 
     def __init__(self, *_args, **_kwargs):
@@ -562,9 +575,10 @@ class SliceController(app_manager.RyuApp):
         self.wsgi.registory['RestServer'] = self.data
         self.data['graph'] = None
         self.data['app'] = self
-        self.data['stat_monitor'] = StatsMonitor()
-        self.route_opt_thread = hub.spawn(self._route_reevaluate_loop)
-        self.service_qos_thread = hub.spawn(self._service_qos_loop)
+        self.data['stat_monitor'] = StatsMonitor(self, poll_interval=10)
+
+        #self.route_opt_thread = hub.spawn(self._route_reevaluate_loop)
+        #self.service_qos_thread = hub.spawn(self._service_qos_loop)
 
         with open(COMMON_CONFIG_FILE) as conf_file:
             self.data['conf'] = json.load(conf_file)
@@ -781,14 +795,14 @@ class SliceController(app_manager.RyuApp):
                 self.remove_flow(dp, None, None, cookie=cookie)
         return
 
-    def create_route(self, begin: net_graph.NetHost, end: net_graph.NetHost, qos: int, best_effort: bool):
+    def create_route(self, begin: net_graph.NetHost, end: net_graph.NetHost, qos: int, best_effort: bool, max_used_bw_percent: float = float('inf')):
         if begin == end:
             return True
         if (begin.ip, end.ip) in self.created_paths or (end.ip, begin.ip) in self.created_paths:
             return True
         qos_config: list[typing.Dict[str, typing.Any]] = self.data['qos']
         logger.info(f"[CONTROLLER] {begin} -> {end}, max delay: {qos_config[qos]['max_delay']}, min bw: {qos_config[qos]['min_bw']}")
-        self.created_paths[(begin.ip, end.ip)] = self.data['graph'].find_path(begin, end, opt="hops", max_delay=qos_config[qos]["max_delay"], min_bw=qos_config[qos]['min_bw'])
+        self.created_paths[(begin.ip, end.ip)] = self.data['graph'].find_path(begin, end, opt="hops", max_delay=qos_config[qos]["max_delay"], min_bw=qos_config[qos]['min_bw'], used_bw_bercent=max_used_bw_percent)
         if self.created_paths[(begin.ip, end.ip)] == None:
             logger.info(f'[CONTROLLER] QoS requirements not met')
             if best_effort:
@@ -891,43 +905,79 @@ class SliceController(app_manager.RyuApp):
 
         logger.info("[CONTROLLER] ******** REROUTING ********")
 
-        qos_config: list[typing.Dict[str, typing.Any]] = self.data['qos']
         graph: net_graph.NetGraph = self.data['graph']
+
+        logger.debug("[CONTROLLER] ******** PATHS USING BW ********")
+        for begin, end in self.created_paths.keys():
+            used_bw = graph.get_path_used_bw(self.created_paths[(begin, end)])
+            logger.debug(f"[CONTROLLER] Path {begin} -> {end} uses {used_bw} Mb/s")
+        logger.debug("[CONTROLLER] ********      END       ********")
+
+        qos_config: list[typing.Dict[str, typing.Any]] = self.data['qos']
         paths_without_qos_temp = copy.deepcopy(self.paths_without_qos)
         logger.info(f"[CONTROLLER] Found {len(paths_without_qos_temp)} routed paths not respecting QoS")
 
-        def reroute_paths(self: SliceController, paths: typing.Dict[typing.Tuple[str, str], int]):
+        def reroute_paths(self: SliceController, paths: typing.Dict[typing.Tuple[str, str], int], has_qos: bool):
             for (begin, end), qos in paths.items():
                 begin_host = net_graph.NetHost(begin)
                 end_host = net_graph.NetHost(end)
 
-                logger.info(f"[CONTROLLER] Attempting to reroute {begin} -> {end}")
+                used_bw = graph.get_path_used_bw(self.created_paths[(begin, end)])
+
+                logger.info(f"[CONTROLLER] Path {begin} -> {end} uses {used_bw} Mb/s")
+
+                if has_qos:
+                    logger.debug(f"[CONTROLLER] Attempting to reroute {begin} -> {end}, attempt to find unused path")
+                else:
+                    logger.debug(f"[CONTROLLER] Attempting to reroute {begin} -> {end}, QoS not met")
                 alternative_path = graph.find_path(begin_host, end_host, opt="hops", max_delay=qos_config[qos]["max_delay"], 
                                                    min_bw=qos_config[qos]['min_bw'], ignore_cache=True, keep_cache=True,
-                                                   old_path=self.created_paths[(begin, end)])
+                                                   old_path=self.created_paths[(begin, end)], used_bw_bercent=MAX_LINK_USED_BW_PERCENT)
 
 
                 begin_end_in_old_paths = (begin_host, end_host) in old_paths
                 end_begin_in_old_paths = (end_host, begin_host) in old_paths
 
                 if alternative_path == None:
-                    logger.info(f"[CONTROLLER] Reroute failed, continue")
-                    #if begin_end_in_old_paths or end_begin_in_old_paths:
-                    #    if (end, begin) in self.created_paths:
-                    #        begin, end = end, begin
+                    if has_qos:
+                        logger.debug("[CONTROLLER] Could not find unused path")
+                    else:
+                        logger.debug(f"[CONTROLLER] Reroute failed, continue")
+                    
                     graph._cache_add(begin_host, end_host, self.created_paths[(begin, end)], "hops") # Yes, we should still try rerouting
                                                                                                      # for "best effort", but for now we will do this
+
+                    with self.service_lock:
+                        services = copy.deepcopy(self.services.services)
+
+                    has_service = False
+                    for service in services:
+                        if (service.curr_ip == begin and service.subscriber == end) or \
+                            (service.curr_ip == end and service.subscriber == begin):
+                            has_service = True
+                            break
+
+                    if has_service and (not (begin, end) in self.paths_without_qos and not (end, begin) in self.paths_without_qos):
+                        logger.info(f"[CONTROLLER] Add {begin} -> {end} to paths not respecting QoS")
+                        self.paths_without_qos[(begin, end)] = qos
                 else:
                     if alternative_path == self.created_paths[(begin, end)]:
                         logger.info(f"[CONTROLLER] Graph computed same path, reinsert in cache")
                         graph._cache_add(begin_host, end_host, self.created_paths[(begin, end)], "hops") # Well this can happen
                                                                                                          # especially if the path was invalidated by a stat update
+
+                        if (begin, end) in self.paths_without_qos:
+                            logger.debug(f"[CONTROLLER] Remove {begin} -> {end} from paths not respcting QoS")
+                            del self.paths_without_qos[(begin, end)]
+                        if (end, begin) in self.paths_without_qos:
+                            logger.debug(f"[CONTROLLER] Remove {begin} -> {end} from paths not respcting QoS")
+                            del self.paths_without_qos[(end, begin)]
                     else:
                         logger.info(f"[CONTROLLER] Reroute success, removing previous path")
                         self.remove_route(net_graph.NetHost(begin), net_graph.NetHost(end), True)
-                        if not self.create_route(net_graph.NetHost(begin), net_graph.NetHost(end), qos, False):
+                        if not self.create_route(net_graph.NetHost(begin), net_graph.NetHost(end), qos, False, MAX_LINK_USED_BW_PERCENT):
                             logger.error(f"[CONTROLLER] But it failed? Fallback to best effort")
-                            if not self.create_route(net_graph.NetHost(begin), net_graph.NetHost(end), qos, True):
+                            if not self.create_route(net_graph.NetHost(begin), net_graph.NetHost(end), qos, True, MAX_LINK_USED_BW_PERCENT):
                                 logger.info(f'[CONTROLLER] {begin} -> {end} not possible, maybe one end-point is isolated?')
 
                 if begin_end_in_old_paths:
@@ -936,11 +986,12 @@ class SliceController(app_manager.RyuApp):
                     del old_paths[(begin_host, end_host)]
 
         #typing.Dict[typing.Tuple[str, str], int]
-        reroute_paths(self, paths_without_qos_temp)
+        reroute_paths(self, paths_without_qos_temp, False)
         old_paths_endpoints = [(begin.ip, end.ip) for begin, end in old_paths.keys()]
         old_paths_endpoints = list(map(lambda path: (path[1], path[0]) if (path[1], path[0]) in self.path_qos else path, old_paths_endpoints))
         old_paths_with_qos = {path: self.path_qos[path] for path in old_paths_endpoints}
-        reroute_paths(self, old_paths_with_qos)
+        logger.info(f"[CONTROLLER] Found {len(old_paths_with_qos)} paths invalidated by port stats")
+        reroute_paths(self, old_paths_with_qos, True)
 
         if len(old_paths) != 0:
             logger.error(f"[CONTROLLER] Not all modified paths have been re-evaluated")
@@ -957,9 +1008,9 @@ class SliceController(app_manager.RyuApp):
             if (begin_host, end_host) in old_paths or (end_host, begin_host) in old_paths:
                 logger.error(f"[CONTROLLER] Unrouted path marked as invalid")
             logger.info(f"[CONTROLLER] Attempting to route {begin} -> {end}")
-            success = self.create_route(begin_host, end_host, qos, False)
+            success = self.create_route(begin_host, end_host, qos, False, MAX_LINK_USED_BW_PERCENT)
             if not success:
-                success = self.create_route(begin_host, end_host, qos, True)
+                success = self.create_route(begin_host, end_host, qos, True, MAX_LINK_USED_BW_PERCENT)
             if not success:
                 logger.info(f'[CONTROLLER] {begin} -> {end} not possible, maybe one end-point is isolated?')
 
@@ -1084,13 +1135,17 @@ class SliceController(app_manager.RyuApp):
                     logger.debug(f"[CONTROLLER] Link already modified")
                     continue
 
-                old_used_bw = float(modified_link.max_bw) - float(modified_link.bw)
+                old_used_bw = float(modified_link.max_bw) - float(modified_link.last_update_bw)
                 bw_ratio = (abs(float(curr_bw) - old_used_bw) / float(modified_link.max_bw))
                 if bw_ratio >= BW_UPDATE_THRESHOLD_RATIO:
                     logger.debug(f"[CONTROLLER] Bandwidth ratio {bw_ratio:.4f} >= {BW_UPDATE_THRESHOLD_RATIO:.4f}")
                 else :
+                    if len(graph.modify_curr_link_bw(modified_link, curr_bw, True)) != 0:
+                        logger.error(f"[CONTROLLER] Update link invalidated cache even though it wasn't requested")
                     logger.debug(f"[CONTROLLER] Bandwidth ratio not reached, skipping")
                     continue
+
+                graph.set_last_update_bw(modified_link, curr_bw)
 
                 all_modified_links.append(modified_link)
                 for begin, end, path in graph.modify_curr_link_bw(modified_link, curr_bw):

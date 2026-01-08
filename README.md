@@ -18,6 +18,13 @@ Check the presence of dev_test image (from comnetsemu)
 docker images | grep dev_test
 ```
 
+Build custom nginx:
+```
+cd custom_nginx
+docker build -t custom_nginx .
+cd ..
+```
+
 # Run
 Make sure that port 53 is free for binding:
 ```

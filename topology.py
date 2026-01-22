@@ -349,7 +349,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     web_server_container = mgr.addContainer(
         "web_server",
         web_server_host.name,
-        "custom_nginx",
+        "nginx:alpine",
         "nginx -g 'daemon off;'"
     )
     
@@ -357,22 +357,38 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     stream_server_container = mgr.addContainer(
         "stream_server",
         stream_server_host.name,
-        "custom_nginx",
+        "nginx:alpine",
         "nginx -g 'daemon off;'"
     )
     
     time.sleep(3)
     
-    # Simulate streaming with a large file (100 MB)
-    print("Creating video file...")
+    # Simulate streaming with two files (initial buffer 50MB + standard chunk 10MB)
+    print("Creating streaming files...")
     docker_client = docker.from_env()
     container = docker_client.containers.get("stream_server")
-    container.exec_run('sh -c "dd if=/dev/zero of=/usr/share/nginx/html/video.dat bs=1M count=100"')
+    container.exec_run('sh -c "dd if=/dev/zero of=/usr/share/nginx/html/buffer.dat bs=1M count=50"')
+    container.exec_run('sh -c "dd if=/dev/zero of=/usr/share/nginx/html/chunk.dat bs=1M count=10"')
     
     # Start client services
     print("\nStarting client services...")
     web_client_host.cmd(f'while true; do curl -s http://web.service.mn:80 > /dev/null 2>&1; sleep 1; done &')
-    stream_client_host.cmd(f'while true; do curl -s -o /dev/null http://stream.service.mn:80/video.dat 2>&1; sleep 2; done &')
+    
+    # Simulate streaming client with variable download pattern:
+    # initial buffer download, then 30% chance of downloading buffer chunk, 70% chance of downloading standard chunk
+    stream_client_host.cmd(
+        f'curl -s -o /dev/null http://stream.service.mn:80/buffer.dat; '
+        f'sleep $((4 + RANDOM % 4)); '
+        f'while true; do '
+        f'  if [ $((RANDOM % 10)) -lt 3 ]; then '
+        f'    curl -s -o /dev/null http://stream.service.mn:80/buffer.dat; '
+        f'    sleep $((4 + RANDOM % 4)); '
+        f'  else '
+        f'    curl -s -o /dev/null http://stream.service.mn:80/chunk.dat; '
+        f'    sleep $((2 + RANDOM % 4)); '
+        f'  fi; '
+        f'done &'
+    )
     
     print("\n*** Services started ***\n")
 

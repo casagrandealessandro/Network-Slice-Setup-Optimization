@@ -42,7 +42,7 @@ def get_port_no(intf):
         return int(intf.name.split('eth')[-1])
 
 
-def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
+def scalable_topology(K=2, T=20, auto_recover=True, num_slices=2):
     """
     Spine–leaf topology with redundancy and dynamic slice creation:
     - K spine switches
@@ -124,20 +124,34 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     # by the time we use it
     net.waitConnected()
 
-    # ----- DYNAMIC SLICE CREATION -----
-    def create_slices(hosts, num_slices):
-        slices = {i: [] for i in range(num_slices)}
-        host_list: list[Node] = hosts[:]
-        random.shuffle(host_list)
+    # # ----- DYNAMIC SLICE CREATION -----
+    # def create_slices(hosts, num_slices):
+    #     slices = {i: [] for i in range(num_slices)}
+    #     host_list: list[Node] = hosts[:]
+    #     random.shuffle(host_list)
 
-        for idx, host in enumerate(host_list):
-            slice_id = idx % num_slices
-            slices[slice_id].append(host.IP())
+    #     for idx, host in enumerate(host_list):
+    #         slice_id = idx % num_slices
+    #         slices[slice_id].append(host.IP())
 
-        return slices
+    #     return slices
 
-    slices = create_slices(list(filter(lambda host: host.name != "dns_server", net.hosts)), num_slices)
-    print("\nDynamically created slices:", slices)
+    # slices = create_slices(list(filter(lambda host: host.name != "dns_server", net.hosts)), num_slices)
+    # print("\nDynamically created slices:", slices)
+
+    # ----- STATIC-LIKE SLICE CREATION (deterministic) -----
+    hosts = list(filter(lambda host: host.name != "dns_server", net.hosts))
+
+    # Sort hosts by name to ensure deterministic assignment
+    hosts.sort(key=lambda h: h.name)
+
+    slices = {i: [] for i in range(num_slices)}
+
+    for idx, host in enumerate(hosts):
+        slice_id = idx % num_slices
+        slices[slice_id].append(host.IP())
+
+    print("\nStatically defined slices (deterministic):", slices)
 
     # Save slices for the controller
     with open("slices.json", "w") as f:
@@ -247,7 +261,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     
     # Client IPs
     web_client_ip = slices[0][1]
-    stream_client_ip = slices[2][1]
+    stream_client_ip = slices[1][1]
     
     # Ping all hosts to trigger path creation
     print("Pre-creating paths for service placement...")
@@ -264,8 +278,8 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
             if web_client_host:
                 web_client_host.cmd(f'ping -c 1 -W 1 {server_ip} > /dev/null 2>&1 &')
     
-    # Slice 2 (Stream service)
-    for server_ip in slices[2]:
+    # Slice 1 (Stream service)
+    for server_ip in slices[1]:
         if server_ip != stream_client_ip:
             print(f"Creating path: {stream_client_ip} -> {server_ip}")
             stream_client_host = None
@@ -349,7 +363,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     web_server_container = mgr.addContainer(
         "web_server",
         web_server_host.name,
-        "nginx:alpine",
+        "custom_nginx",
         "nginx -g 'daemon off;'"
     )
     
@@ -357,7 +371,7 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
     stream_server_container = mgr.addContainer(
         "stream_server",
         stream_server_host.name,
-        "nginx:alpine",
+        "custom_nginx",
         "nginx -g 'daemon off;'"
     )
     
@@ -389,6 +403,12 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
         f'  fi; '
         f'done &'
     )
+    
+    # Start iperf3 traffic between web client and web server
+    print("\nInjecting iperf3 traffic...")
+    web_server_host.cmd('iperf3 -s &')
+    time.sleep(1)
+    web_client_host.cmd(f'iperf3 -c {web_server_ip} -b 50M -t 180 &')
     
     print("\n*** Services started ***\n")
 
@@ -563,4 +583,4 @@ def scalable_topology(K=3, T=20, auto_recover=True, num_slices=3):
 
 if __name__ == "__main__":
     setLogLevel("info")
-    scalable_topology(K=3, T=15, auto_recover=False, num_slices=3)
+    scalable_topology(K=2, T=15, auto_recover=False, num_slices=2)

@@ -856,6 +856,7 @@ class SliceController(app_manager.RyuApp):
     
     @set_ev_cls(InitEvent, MAIN_DISPATCHER)
     def init_handler(self, ev: ofp_event.EventOFPMsgBase):
+        logger.info("\n\n************************************************")
         logger.info("[CONTROLLER] ******** INIT ********")
         slices: typing.Dict[str, typing.List[str]] = self.data['slices']
         dns_ip: str = self.data['conf']['dns_ip']
@@ -871,10 +872,12 @@ class SliceController(app_manager.RyuApp):
                 self.create_route(net_graph.NetHost(host), net_graph.NetHost(dns_ip), self.data['default_qos'], True)
         self.dns_conn = dns_api.DNSServer.connect('admin', 'admin', f"127.0.0.1:{self.data['conf']['dns_api_port']}")
         logger.info("[CONTROLLER] ******** END ********")
+        logger.info("********************************************************************\n\n")
         return
     
     @set_ev_cls(ShutdownEvent, MAIN_DISPATCHER)
     def shutdown_handler(self, ev: ofp_event.EventOFPMsgBase):
+        logger.info("\n\n********************************************************************")
         logger.info("[CONTROLLER] ******** SHUTDOWN ********")
         for host_pair, _path in copy.deepcopy(self.created_paths).items():
             self.remove_route(net_graph.NetHost(host_pair[0]), net_graph.NetHost(host_pair[1]))
@@ -893,6 +896,7 @@ class SliceController(app_manager.RyuApp):
         del self.dns_conn
         self.dns_conn = None
         logger.info("[CONTROLLER] ******** END ********")
+        logger.info("********************************************************************\n\n")
 
 
     def attempt_rerouting(self):
@@ -903,6 +907,7 @@ class SliceController(app_manager.RyuApp):
         # we get a list of paths that we may need to change
         old_paths = self.apply_port_changes()
 
+        logger.info("\n\n********************************************************************")
         logger.info("[CONTROLLER] ******** REROUTING ********")
 
         graph: net_graph.NetGraph = self.data['graph']
@@ -1015,6 +1020,7 @@ class SliceController(app_manager.RyuApp):
                 logger.info(f'[CONTROLLER] {begin} -> {end} not possible, maybe one end-point is isolated?')
 
         logger.info("[CONTROLLER] ******** END ********")
+        logger.info("********************************************************************\n\n")
         
         return
 
@@ -1028,6 +1034,7 @@ class SliceController(app_manager.RyuApp):
         if msg.reason != ofp.OFPPR_MODIFY:
             return 
         
+        logger.info("\n\n********************************************************************")
         logger.info("[CONTROLLER] ******** PORT STATUS UPDATE ********")
         
         port = msg.desc
@@ -1067,11 +1074,13 @@ class SliceController(app_manager.RyuApp):
             mod_paths = graph.modify_link(modified_link, port2_down=is_port_down)
 
         logger.info("[CONTROLLER] ******** END ********")
+        logger.info("********************************************************************\n\n")
 
         if len(mod_paths) != 0:
             logger.info(f"[CONTROLLER] Link status change caused {len(mod_paths)} to be invalidated")
             for begin, end, path in mod_paths:
                 logger.info(f"[CONTROLLER] {begin} -> {end} invalidated")
+                logger.info("********************************************************************\n\n")
                 self.remove_route(begin, end, True) 
             self.attempt_rerouting()
         return
@@ -1095,6 +1104,7 @@ class SliceController(app_manager.RyuApp):
             self.port_stat_changes.clear()
             return {}
         
+        logger.info("\n\n********************************************************************")
         logger.info("[CONTROLLER] ******** APPLY PORT STATS ********")
 
         graph: net_graph.NetGraph = self.data['graph']
@@ -1162,14 +1172,17 @@ class SliceController(app_manager.RyuApp):
         
         logger.info(f"[CONTROLLER] Stat update caused {len(inv_paths)} paths to be invalidated")
         logger.info("[CONTROLLER] ******** END ********")
+        logger.info("********************************************************************\n\n")
         return inv_paths
 
     @set_ev_cls(RouteReevaluateEvent, MAIN_DISPATCHER)
     def handle_route_reevaluate(self, ev: ofp_event.EventOFPMsgBase):
+        logger.info("\n\n********************************************************************")
         logger.info("\n[CONTROLLER] ******** ROUTE AND SERVICE EVALUATION ********")
         self.attempt_rerouting()
         self.evaluate_services_qos()
         logger.info("[CONTROLLER] ********            END               ********")
+        logger.info("********************************************************************\n\n")
 
     
     def add_service(self, service: Service) -> typing.Optional[Service]:
@@ -1177,6 +1190,7 @@ class SliceController(app_manager.RyuApp):
     #2. Set DNS entry
     #3. Save to file
     #Use lock to manage routes?
+        logger.info("\n\n********************************************************************")
         logger.info(f"\n[CONTROLLER] ******** ADD SERVICE {service.domain} ********")
         service_file_path: str = self.data['conf']['service_list_file']
         if not 'qos' in self.data:
@@ -1277,6 +1291,7 @@ class SliceController(app_manager.RyuApp):
                 logger.error("[CONTROLLER] Could not create service, cannot add to list")
                 return None
             logger.info("[CONTROLLER] ******** END ********")
+            logger.info("********************************************************************\n\n")
         return service
     
     def remove_service(self, id: int) -> bool:
@@ -1324,4 +1339,5 @@ class SliceController(app_manager.RyuApp):
                 logger.error("[CONTROLLER] File update failed")
                 return False
         logger.info("[CONTROLLER] ******** END ********")
+        logger.info("********************************************************************\n\n")
         return True

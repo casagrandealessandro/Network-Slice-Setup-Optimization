@@ -432,11 +432,11 @@ def scalable_topology(K=2, T=20, auto_recover=True, num_slices=2, scenario="defa
         print(f"\n*** Scenario: {scenario} - Starting environmental events ***")
         
         def run_events():
-            T = 2  # delay between events
+            T = 20  # delay between events
             auto_recover = True
             while True:
                 time.sleep(T)
-                print("\nAlessandro did this")
+                print("\nOh no, a link went down! (sad trombone sound)")
                 
                 leaf = random.choice(leaf_switches)
                 spine = random.choice(spine_switches)
@@ -452,6 +452,7 @@ def scalable_topology(K=2, T=20, auto_recover=True, num_slices=2, scenario="defa
                 if auto_recover:
                     time.sleep(T)
                     net.configLinkStatus(spine.name, leaf.name, "up")
+                    print("\nLink recovered! (happy trombone sound)")
 
         # Run the events in a single background thread
         threading.Thread(target=run_events, daemon=True).start()
@@ -478,6 +479,9 @@ def scalable_topology(K=2, T=20, auto_recover=True, num_slices=2, scenario="defa
             print(f"iperf3 client running on {iperf_client_host.name} ({iperf_client_host.IP()})")
         else:
             print("WARNING: No available host for iperf3 client in slice 1")
+
+    elif scenario == "default":
+        print(f"\n*** Scenario: {scenario} - No additional traffic ***")
 
     else:
         print("\n%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%")

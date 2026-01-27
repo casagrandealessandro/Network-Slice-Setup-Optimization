@@ -1,118 +1,141 @@
-## NB: All steps to be done in the Mininet VM
+# Network Slice Setup Optimization
 
-# Setup
-Pull DNS container image from Docker:
+SDN-based network slicing with QoS management, service migration, and dynamic DNS resolution.
+
+This is a project developed for the Networking Mod. 2 course (University of Trento), by the students
+- [Nome Cognome] - Badge number: [MATRICOLA]
+- [Nome Cognome] - Badge number: [MATRICOLA]
+- [Nome Cognome] - Badge number: [MATRICOLA]
+
+## Architecture
+- **Topology**: Spine-leaf with redundancy
+    - K spine switches
+    - 2*K leaf switches
+    - K hosts per leaf
+    - each leaf is connected to all spines
+    - every T seconds a random spine–leaf link fails in the env_events scenario (see below)
+- **Slices**: 2 slices created statically (even and odd hosts), with possibility to create them dinamically
+- **QoS Levels**: 3 tiers with bandwidth/delay guarantees
+- **Services**: Dynamic placement with DNS integration
+- **Migration**: Automatic service relocation on QoS degradation (3 violations → migrate)
+- **QoS Tuning**: Bandwidth increase on first violation (+20%)
+- **Scenarios**: based on type of traffic to generate ("default", "iperf_web", "iperf_stream", "env_events")
+
+---
+
+## Prerequisites
+
+- ComNetsEmu VM running
+- Docker installed
+- Python 3.8+
+
+## Setup
+
+**All steps must be executed in the ComNetsEmu VM**
+
+### 1. Install Dependencies
+
+```bash
+sudo pip3 install 'urllib3<2.0'
 ```
+
+### 2. Build Docker Images
+
+```bash
+# Pull DNS server image
 docker pull technitium/dns-server
-```
 
-Build image:
-```
+# Build DNS container for Mininet
 cd dns_docker
 docker build -t dns-mn .
 cd ..
-```
 
-Check the presence of dev_test image (from comnetsemu)
-```
-docker images | grep dev_test
-```
-
-Build custom nginx:
-```
+# Build custom nginx
 cd custom_nginx
 docker build -t custom_nginx .
 cd ..
+
+# Verify dev_test image (from ComNetsEmu)
+docker images | grep dev_test
 ```
 
-# Run
-Make sure that port 53 is free for binding:
-```
+## Running the Network
+
+### 1. Prepare DNS Port
+
+Free port 53 for DNS binding:
+
+```bash
 sudo sh dns_docker/stop_systemd_resolve.sh
 ```
 
-Backup /etc/resolv.conf if necessary, because the script will overwrite it.
-    
-In a terminal:
-```
-ryu run controller/controller_main.py
+⚠️ **Warning**: This overwrites `/etc/resolv.conf`. Back it up if needed.
+
+### 2. Start Controller
+
+In terminal 1:
+
+```bash
+sudo ryu run controller/controller_main.py
 ```
 
-In a second terminal:
-```
-sudo python3 topology.py
+### 3. Start Network Topology
+
+In terminal 2:
+
+```bash
+sudo bash run_net.sh [scenario]
 ```
 
-Every time you restart make sure to cleanup everything
-```
+Available scenarios:
+- `default` - No extra traffic
+- `iperf_web` - Saturate web service link
+- `iperf_stream` - Saturate streaming service link
+- `env_events` - Random link failures with auto-recovery
+
+### 4. Cleanup
+
+Cleanup is automatic when exiting Mininet CLI with `quit`. Manual cleanup:
+
+```bash
 sudo mn -c
 docker stop $(docker ps -aq)
 docker rm $(docker ps -aq)
 rm -rf config/dns_config/zones/*
 ```
 
-Alternative way to run
+## Controller REST API
 
-In a terminal:
-```
-ryu run controller/controller_main.py
-```
+Base URL: `http://127.0.0.1:8080/api/v0`
 
-In a second terminal:
-```
-bash run_net.sh
-```
+### Endpoints
 
-When you quit mininet CLI, the cleanup will be automatically done.
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/service/list` | List all services |
+| POST | `/service/create` | Create new service |
+| DELETE | `/service/:id/remove` | Remove service by ID |
 
-# Check mininet-host connectivity and services
-let this be the output of the service start phase:
-```
-Web Server: h13 (10.0.0.13)                      
-Web Client: h4 (10.0.0.4)                       
-Stream Server: h18 (10.0.0.18)                   
-Stream Client: h11 (10.0.0.11)                   
-                                                                                                                      
-Starting web server on h13...
-Starting stream server on h18...
-Creating video file...
+### Create Service
 
-Starting client services...
+**Request:**
+```json
+POST /api/v0/service/create
+Content-Type: application/json
 
-*** Services started ***
+{
+  "domain": "example.service.mn",
+  "subscriber": "10.0.0.4",
+  "qos": 1,
+  "service_type": "browsing"
+}
 ```
 
-Check services connectivity
-Web service:
+**Response:**
+```json
+{
+  "status": "E_OK",
+  "service_id": 3,
+  "service_ip": "10.0.0.15"
+}
 ```
-mininet> h13 netstat -tlnp | grep 80
-mininet> h4 curl -I http://10.0.0.13:80
-```
-Streaming service (the download takes a while):
-```
-mininet> h18 netstat -tlnp | grep 80
-mininet> h11 curl -o /dev/null http://10.0.0.18:80/video.dat
-```
-
-# TODO
-1. Controller evaluates service quality and whether to migrate
-2. If a service is unreachable from its user, migrate it
-3. In the controller, when marking a service for migration, effectively find a new ip and modify the DNS accordingly
-4. Migration (topology side)
-
-# Controller services
-* GET /api/v0/service/list: Returns list of all services
-* POST /api/v0/service/create: Create new service
-* DELETE /api/v0/service/:id/remove: Remove specific service
-
-# New service creation
-In the request's body, put the following dict:
-- "domain": Domain of the service
-- "subscriber": IP of the user
-- "qos": Index of QoS used by the service
-- "type": Type of the service
-
-Will return a dictionary with:
-- "status": E_OK if return status is 200
-- "service_id": ID of the new service
-- "service_ip": Current IP of the service

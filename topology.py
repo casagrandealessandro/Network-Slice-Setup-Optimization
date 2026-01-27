@@ -49,7 +49,7 @@ def scalable_topology(K=2, T=20, auto_recover=True, num_slices=2, scenario="defa
     - 2*K leaf switches
     - K hosts per leaf
     - each leaf is connected to all spines
-    - every T seconds a random spine–leaf link fails
+    - every T seconds a random spine–leaf link fails during env_events scenario
     - scenario: type of traffic to generate ("default", "iperf", "custom")
     """
     docker_img_ls = Popen(['docker image ls | grep dns-mn'], shell=True, stdout=PIPE, stderr=PIPE)
@@ -110,7 +110,7 @@ def scalable_topology(K=2, T=20, auto_recover=True, num_slices=2, scenario="defa
              net.addLink(spine, leaf, delay="5ms", custom_bw="100")
 
         # Add hosts as DockerHost
-        for _ in range(2 * K):
+        for _ in range(K):
             #host = net.addHost(f"h{len(net.hosts) + 1}")
             host = net.addDockerHost(
                 f"h{len(net.hosts) + 1}",
@@ -432,7 +432,6 @@ def scalable_topology(K=2, T=20, auto_recover=True, num_slices=2, scenario="defa
         print(f"\n*** Scenario: {scenario} - Starting environmental events ***")
         
         def run_events():
-            T = 20  # delay between events
             auto_recover = True
             while True:
                 time.sleep(T)

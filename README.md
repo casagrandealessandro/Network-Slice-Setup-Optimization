@@ -27,7 +27,7 @@ This is a project developed for the Networking Mod. 2 course (University of Tren
 
 - ComNetsEmu VM running
 - Docker installed
-- Python 3.8+
+- Python 3.9+
 
 ## Setup
 
@@ -55,8 +55,10 @@ cd custom_nginx
 docker build -t custom_nginx .
 cd ..
 
-# Verify dev_test image (from ComNetsEmu)
-docker images | grep dev_test
+# Build dev_test
+cd dev_test_build
+docker build -t dev_test .
+cd ..
 ```
 
 ## Running the Network
